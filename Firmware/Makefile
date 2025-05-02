@@ -78,8 +78,18 @@ all:		build
 # Composite targets for handling actions.
 #
 build:		$(filter build~%,$(TARGETS))
-install:	$(filter install~%,$(TARGETS))
-clean:		$(filter clean~%,$(TARGETS))
+install:
+	@$(MAKE) $(filter install~%,$(TARGETS))
+	@echo "Combining bootloader and radio firmware into a single hex file..."
+	srec_cat dst/bootloader~hm_trp~915.hex -Intel dst/radio~hm_trp.ihx -Intel -o dst/combined~915.hex -Intel
+	srec_info dst/combined~915.hex -Intel
+	srec_cat dst/bootloader~hm_trp~433.hex -Intel dst/radio~hm_trp.ihx -Intel -o dst/combined~433.hex -Intel
+	srec_info dst/combined~433.hex -Intel
+clean:
+	@echo "Removing entire build directory..."
+	rm -rf obj/
+	rm -rf dst/
+	@$(MAKE) $(filter clean~%,$(TARGETS))
 
 
 #
