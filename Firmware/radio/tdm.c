@@ -706,6 +706,9 @@ tdm_serial_loop(void)
         link_update();
         last_link_update = tnow;
       }
+      // Halt CPU until next interrupt (~32ms Timer2 tick or UART byte).
+      // This drops MCU current from ~5mA to ~1-2mA during sleep windows.
+      PCON |= 0x01;
       continue;
     }
 #endif
