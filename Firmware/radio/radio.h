@@ -317,4 +317,14 @@ extern uint8_t radio_get_oscillator_capacitance(void);
 
 #endif // BOARD_mro900
 
+/// switch radio core between low-power hold and active receive-ready mode
+///
+/// @param enabled		true to enter low-power hold, false to return to active mode
+extern void radio_set_low_power_mode(bool enabled);
+
+/// drive the EZRadioPRO GPIO2 low-power indicator level on supported boards
+///
+/// @param sleeping		true keeps GPIO2 forced low, false restores default high
+extern void radio_set_sleep_gpio2(bool sleeping);
+
 #endif // _RADIO_H_

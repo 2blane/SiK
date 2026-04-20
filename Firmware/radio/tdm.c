@@ -139,6 +139,28 @@ static __bit send_statistics;
 /// set when we should send a MAVLink report pkt
 extern uint8_t seen_mavlink;
 
+#if defined BOARD_hm_trp
+#define MAVLINK_MSG_ID_COMMAND_LONG 76
+#define MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN 246
+#define SKYBRUSH_LOW_POWER_MODE 126
+#define SKYBRUSH_RESUME_FROM_LOW_POWER_MODE 127
+
+#define LOW_POWER_SLEEP_HALF_SECONDS 20
+#define LOW_POWER_LISTEN_HALF_SECONDS 2
+
+enum low_power_state {
+  LOW_POWER_DISABLED = 0,
+  LOW_POWER_SLEEPING = 1,
+  LOW_POWER_LISTENING = 2
+};
+
+__pdata static enum low_power_state low_power_state;
+__pdata static uint8_t low_power_half_seconds_remaining;
+__pdata static uint16_t low_power_last_tick;
+__pdata static uint8_t low_power_scan_index;
+__pdata static int8_t low_power_command_mode;
+#endif
+
 struct tdm_trailer {
 	uint16_t window:13;
 	uint16_t command:1;
@@ -492,6 +514,129 @@ handle_at_command(__pdata uint8_t len)
  return false;
 }
 
+#if defined BOARD_hm_trp
+static int8_t
+decode_power_mode_command(__xdata uint8_t *buf, __pdata uint8_t offset)
+{
+  if (buf[offset+28] != (MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN & 0xFF) ||
+      buf[offset+29] != ((MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN >> 8) & 0xFF)) {
+    return -1;
+  }
+
+  if (buf[offset+0] == 0x00 && buf[offset+1] == 0x00 &&
+      buf[offset+2] == 0xFC && buf[offset+3] == 0x42) {
+    return SKYBRUSH_LOW_POWER_MODE;
+  }
+  if (buf[offset+0] == 0x00 && buf[offset+1] == 0x00 &&
+      buf[offset+2] == 0xFE && buf[offset+3] == 0x42) {
+    return SKYBRUSH_RESUME_FROM_LOW_POWER_MODE;
+  }
+
+  return -1;
+}
+
+static void
+tdm_enter_low_power_sleep(void)
+{
+  if (low_power_state == LOW_POWER_SLEEPING) {
+    return;
+  }
+
+  radio_set_sleep_gpio2(true);
+  radio_set_low_power_mode(true);
+
+  low_power_state = LOW_POWER_SLEEPING;
+  low_power_half_seconds_remaining = LOW_POWER_SLEEP_HALF_SECONDS;
+  low_power_last_tick = timer2_tick();
+}
+
+static void
+tdm_enter_low_power_listen_window(void)
+{
+  radio_set_low_power_mode(false);
+  radio_receiver_on();
+
+  low_power_state = LOW_POWER_LISTENING;
+  low_power_half_seconds_remaining = LOW_POWER_LISTEN_HALF_SECONDS;
+}
+
+static void
+tdm_exit_low_power_mode(void)
+{
+  radio_set_low_power_mode(false);
+  radio_set_sleep_gpio2(false);
+  radio_receiver_on();
+
+  low_power_state = LOW_POWER_DISABLED;
+  low_power_half_seconds_remaining = 0;
+}
+
+static void
+tdm_update_low_power_state(__pdata uint16_t tnow)
+{
+  if (low_power_state == LOW_POWER_DISABLED) {
+    return;
+  }
+
+  while ((uint16_t)(tnow - low_power_last_tick) >= 32768U) {
+    low_power_last_tick += 32768U;
+
+    if (low_power_half_seconds_remaining > 0) {
+      low_power_half_seconds_remaining--;
+    }
+
+    if (low_power_half_seconds_remaining != 0) {
+      continue;
+    }
+
+    if (low_power_state == LOW_POWER_SLEEPING) {
+      tdm_enter_low_power_listen_window();
+    } else {
+      tdm_enter_low_power_sleep();
+    }
+  }
+}
+
+static void
+tdm_handle_low_power_command(__pdata uint8_t len, __xdata uint8_t *buf)
+{
+  low_power_command_mode = -1;
+  low_power_scan_index = 0;
+
+  while (low_power_scan_index + 41 <= len) {
+    if (buf[low_power_scan_index] == MAVLINK10_STX &&
+        buf[low_power_scan_index+1] == 33 &&
+        buf[low_power_scan_index+5] == MAVLINK_MSG_ID_COMMAND_LONG) {
+      low_power_command_mode = decode_power_mode_command(&buf[low_power_scan_index+6], 0);
+      if (low_power_command_mode >= 0) {
+        break;
+      }
+    }
+
+    if (low_power_scan_index + 43 <= len &&
+        buf[low_power_scan_index] == MAVLINK20_STX &&
+        buf[low_power_scan_index+1] == 33 &&
+        (buf[low_power_scan_index+2] & 0x01) == 0 &&
+        buf[low_power_scan_index+7] == MAVLINK_MSG_ID_COMMAND_LONG &&
+        buf[low_power_scan_index+8] == 0 &&
+        buf[low_power_scan_index+9] == 0) {
+      low_power_command_mode = decode_power_mode_command(&buf[low_power_scan_index+10], 0);
+      if (low_power_command_mode >= 0) {
+        break;
+      }
+    }
+
+    low_power_scan_index++;
+  }
+
+  if (low_power_command_mode == SKYBRUSH_LOW_POWER_MODE) {
+    tdm_enter_low_power_sleep();
+  } else if (low_power_command_mode == SKYBRUSH_RESUME_FROM_LOW_POWER_MODE) {
+    tdm_exit_low_power_mode();
+  }
+}
+#endif
+
 // a stack carary to detect a stack overflow
 __at(0xFF) uint8_t __idata _canary;
 
@@ -517,6 +662,12 @@ tdm_serial_loop(void)
   __pdata uint16_t last_link_update = last_t;
   
 
+#if defined BOARD_hm_trp
+  low_power_state = LOW_POWER_DISABLED;
+  low_power_half_seconds_remaining = 0;
+  low_power_last_tick = last_t;
+#endif
+
   _canary = 42;
   
   for (;;) {
@@ -536,10 +687,35 @@ tdm_serial_loop(void)
       display_test_output();
       test_display = 0;
     }
+
+    tnow = timer2_tick();
+#if defined BOARD_hm_trp
+    tdm_update_low_power_state(tnow);
+
+    if (low_power_state == LOW_POWER_SLEEPING) {
+      tdelta = tnow - last_t;
+      tdm_state_update(tdelta);
+      last_t = tnow;
+
+      if (tnow - last_link_update > 32768) {
+        link_update();
+        last_link_update = tnow;
+      }
+      continue;
+    }
+#endif
     
     if (seen_mavlink && feature_mavlink_framing && !at_mode_active) {
+#if defined BOARD_hm_trp
+      if (low_power_state != LOW_POWER_DISABLED) {
+        // Do not inject RADIO_STATUS while in low-power mode.
+      } else
+#endif
+      
+      {
       if (MAVLink_report()) {
         seen_mavlink = 0;
+      }
       }
     }
     
@@ -573,6 +749,12 @@ tdm_serial_loop(void)
       // extract control bytes from end of packet
       memcpy(&trailer, &pbuf[len-sizeof(trailer)], sizeof(trailer));
       len -= sizeof(trailer);
+
+#if defined BOARD_hm_trp
+      if (len != 0 && trailer.command == 0) {
+        tdm_handle_low_power_command(len, pbuf);
+      }
+#endif
       
       if (trailer.window == 0 && len != 0) {
         // its a control packet

@@ -130,7 +130,7 @@ endif
 
 $(OBJROOT)/%.rel: $(PRODUCT_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(v)(echo -n $(OBJROOT)/ && $(CC) $(DEPFLAGS) $<) > $(subst .rel,.dep,$@)
+	$(v)(printf %s $(OBJROOT)/ && $(CC) $(DEPFLAGS) $<) > $(subst .rel,.dep,$@)
 ifeq ($(MODEL_HUGE), 1)
 	@echo CC $(shell $(BANK_ALLOC) $< $(PRODUCT_DIR)/segment.rules $@) $<
 	$(v)$(CC) --codeseg $(shell $(BANK_ALLOC) $< $(PRODUCT_DIR)/segment.rules $@) $(CFLAGS) -c $< -o $@

@@ -648,6 +648,39 @@ radio_get_channel(void)
 	return settings.current_channel;
 }
 
+void
+radio_set_low_power_mode(bool enabled)
+{
+	EX0_SAVE_DISABLE;
+
+	if (enabled) {
+		// Stop RX interrupts and keep only the crystal oscillator running.
+		register_write(EZRADIOPRO_INTERRUPT_ENABLE_1, 0x00);
+		register_write(EZRADIOPRO_INTERRUPT_ENABLE_2, 0x00);
+		clear_status_registers();
+		radio_clear_transmit_fifo();
+		radio_clear_receive_fifo();
+		register_write(EZRADIOPRO_OPERATING_AND_FUNCTION_CONTROL_1, EZRADIOPRO_XTON);
+	}
+
+	EX0_RESTORE;
+}
+
+void
+radio_set_sleep_gpio2(bool sleeping)
+{
+#if defined ENABLE_RFM50_SWITCH
+	register_write(EZRADIOPRO_GPIO2_CONFIGURATION, 0x0A);
+	if (sleeping) {
+		register_write(EZRADIOPRO_IO_PORT_CONFIGURATION, 0x00);
+	} else {
+		register_write(EZRADIOPRO_IO_PORT_CONFIGURATION, 0x04);
+	}
+#else
+	(void)sleeping;
+#endif
+}
+
 // This table gives the register settings for the radio core indexed by
 // the desired air data rate.
 //

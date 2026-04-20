@@ -670,6 +670,25 @@ radio_get_channel(void)
 	return settings.current_channel;
 }
 
+void
+radio_set_low_power_mode(bool enabled)
+{
+	if (enabled) {
+		EX0 = 0;
+		cmd_get_int_status_clear_all();
+		wait_for_cts();
+		clear_rx_fifo();
+		cmd_change_state(STATE_READY);
+		wait_for_cts();
+	}
+}
+
+void
+radio_set_sleep_gpio2(bool sleeping)
+{
+	(void)sleeping;
+}
+
 #define NUM_DATA_RATES 13
 // air data rates in kbps units
 __code static const uint8_t air_data_rates[NUM_DATA_RATES] = {
