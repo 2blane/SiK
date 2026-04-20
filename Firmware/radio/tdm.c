@@ -148,6 +148,26 @@ extern uint8_t seen_mavlink;
 #define LOW_POWER_SLEEP_HALF_SECONDS 20
 #define LOW_POWER_LISTEN_HALF_SECONDS 2
 
+// Experimental: enter MCU STOP for the full 10s sleep window and wake from
+// SmaRTClock alarm interrupt instead of periodic Timer2 wakeups.
+#ifndef LOW_POWER_EXPERIMENTAL_DEEP_SLEEP
+#define LOW_POWER_EXPERIMENTAL_DEEP_SLEEP 0
+#endif
+
+#define LOW_POWER_RTC_TICKS_PER_SECOND 40000UL
+#define LOW_POWER_RTC_SLEEP_TICKS 400000UL
+#define LOW_POWER_RTC_ALARM_IE1_MASK 0x01
+#define LOW_POWER_RTC_CN_RUN ((uint8_t)(RTC_CN_EN | RTC_CN_TR))
+#define LOW_POWER_RTC_CN_CAPTURE ((uint8_t)(RTC_CN_EN | RTC_CN_TR | RTC_CN_CAP))
+#define LOW_POWER_RTC_CN_RUN_ALARM ((uint8_t)(RTC_CN_EN | RTC_CN_TR | RTC_CN_AEN))
+
+// CPU low-power mode used while radio is in low-power cycle:
+// 0x01 = IDLE (wake-safe via Timer2/UART interrupts)
+// 0x02 = STOP (deeper current reduction, but requires dedicated wake sources)
+#ifndef LOW_POWER_MCU_SLEEP_PCON
+#define LOW_POWER_MCU_SLEEP_PCON 0x01
+#endif
+
 enum low_power_state {
   LOW_POWER_DISABLED = 0,
   LOW_POWER_SLEEPING = 1,
@@ -159,6 +179,110 @@ __pdata static uint8_t low_power_half_seconds_remaining;
 __pdata static uint16_t low_power_last_tick;
 __pdata static uint8_t low_power_scan_index;
 __pdata static int8_t low_power_command_mode;
+static __bit low_power_rtc_ready;
+static __bit low_power_rtc_alarm_fired;
+
+#if LOW_POWER_EXPERIMENTAL_DEEP_SLEEP
+static uint8_t
+tdm_rtc_read_reg(__pdata uint8_t reg)
+{
+  while (RTC0ADR & RTC0ADR_BUSY) ;
+  RTC0ADR = RTC0ADR_BUSY | reg;
+  while (RTC0ADR & RTC0ADR_BUSY) ;
+  return RTC0DAT;
+}
+
+static void
+tdm_rtc_write_reg(__pdata uint8_t reg, __pdata uint8_t val)
+{
+  while (RTC0ADR & RTC0ADR_BUSY) ;
+  RTC0ADR = reg;
+  RTC0DAT = val;
+}
+
+static uint32_t
+tdm_rtc_read_count32(void)
+{
+  union {
+    uint8_t b[4];
+    uint32_t l;
+  } mix;
+
+  tdm_rtc_write_reg(RTC_CN, LOW_POWER_RTC_CN_CAPTURE);
+  while (tdm_rtc_read_reg(RTC_CN) & RTC_CN_CAP) ;
+
+  mix.b[0] = tdm_rtc_read_reg(RTC_CAPTURE0);
+  mix.b[1] = tdm_rtc_read_reg(RTC_CAPTURE1);
+  mix.b[2] = tdm_rtc_read_reg(RTC_CAPTURE2);
+  mix.b[3] = tdm_rtc_read_reg(RTC_CAPTURE3);
+
+  return mix.l;
+}
+
+static void
+tdm_rtc_clear_alarm_flag(void)
+{
+  __pdata uint8_t cn;
+  cn = tdm_rtc_read_reg(RTC_CN);
+  cn &= ~(RTC_CN_ALRM | RTC_CN_CAP | RTC_CN_SET);
+  tdm_rtc_write_reg(RTC_CN, cn);
+}
+
+static void
+tdm_low_power_rtc_init(void)
+{
+  if (low_power_rtc_ready) {
+    return;
+  }
+
+  RTC0KEY = 0xA5;
+  RTC0KEY = 0xF1;
+  tdm_rtc_write_reg(RTC_PIN, RTC_PIN_SELF_OSC);
+  tdm_rtc_write_reg(RTC_XCN, RTC_XCN_BIASX2);
+  tdm_rtc_write_reg(RTC_CN, LOW_POWER_RTC_CN_RUN);
+  EIE1 |= LOW_POWER_RTC_ALARM_IE1_MASK;
+
+  low_power_rtc_ready = 1;
+}
+
+static void
+tdm_low_power_rtc_disable_alarm(void)
+{
+  __pdata uint8_t cn;
+  if (!low_power_rtc_ready) {
+    return;
+  }
+
+  cn = tdm_rtc_read_reg(RTC_CN);
+  cn &= ~(RTC_CN_AEN | RTC_CN_ALRM | RTC_CN_CAP | RTC_CN_SET);
+  tdm_rtc_write_reg(RTC_CN, (uint8_t)(cn | LOW_POWER_RTC_CN_RUN));
+}
+
+static void
+tdm_low_power_schedule_rtc_alarm(void)
+{
+  union {
+    uint8_t b[4];
+    uint32_t l;
+  } alarm;
+
+  tdm_low_power_rtc_init();
+  alarm.l = tdm_rtc_read_count32() + LOW_POWER_RTC_SLEEP_TICKS;
+
+  tdm_rtc_write_reg(RTC_ALARM0, alarm.b[0]);
+  tdm_rtc_write_reg(RTC_ALARM1, alarm.b[1]);
+  tdm_rtc_write_reg(RTC_ALARM2, alarm.b[2]);
+  tdm_rtc_write_reg(RTC_ALARM3, alarm.b[3]);
+  tdm_rtc_write_reg(RTC_CN, LOW_POWER_RTC_CN_RUN_ALARM);
+  low_power_rtc_alarm_fired = 0;
+}
+
+INTERRUPT(LowPower_RTCAlarm_ISR, INTERRUPT_RTC0ALARM)
+{
+  low_power_rtc_alarm_fired = 1;
+  tdm_rtc_clear_alarm_flag();
+}
+#endif
 #endif
 
 struct tdm_trailer {
@@ -548,11 +672,17 @@ tdm_enter_low_power_sleep(void)
   low_power_state = LOW_POWER_SLEEPING;
   low_power_half_seconds_remaining = LOW_POWER_SLEEP_HALF_SECONDS;
   low_power_last_tick = timer2_tick();
+#if LOW_POWER_EXPERIMENTAL_DEEP_SLEEP
+  tdm_low_power_schedule_rtc_alarm();
+#endif
 }
 
 static void
 tdm_enter_low_power_listen_window(void)
 {
+#if LOW_POWER_EXPERIMENTAL_DEEP_SLEEP
+  tdm_low_power_rtc_disable_alarm();
+#endif
   radio_set_low_power_mode(false);
   if (radio_get_low_power_profile() == RADIO_LOW_POWER_STANDBY) {
     // Standby wake requires oscillator/PLL settle time before reliable RX.
@@ -567,6 +697,10 @@ tdm_enter_low_power_listen_window(void)
 static void
 tdm_exit_low_power_mode(void)
 {
+#if LOW_POWER_EXPERIMENTAL_DEEP_SLEEP
+  tdm_low_power_rtc_disable_alarm();
+  low_power_rtc_alarm_fired = 0;
+#endif
   radio_set_low_power_mode(false);
   radio_set_sleep_gpio2(false);
   radio_receiver_on();
@@ -670,6 +804,8 @@ tdm_serial_loop(void)
   low_power_state = LOW_POWER_DISABLED;
   low_power_half_seconds_remaining = 0;
   low_power_last_tick = last_t;
+  low_power_rtc_ready = 0;
+  low_power_rtc_alarm_fired = 0;
   radio_set_low_power_profile(RADIO_LOW_POWER_STANDBY);
 #endif
 
@@ -706,9 +842,20 @@ tdm_serial_loop(void)
         link_update();
         last_link_update = tnow;
       }
-      // Halt CPU until next interrupt (~32ms Timer2 tick or UART byte).
-      // This drops MCU current from ~5mA to ~1-2mA during sleep windows.
-      PCON |= 0x01;
+#if LOW_POWER_EXPERIMENTAL_DEEP_SLEEP
+      if (low_power_rtc_alarm_fired) {
+        low_power_rtc_alarm_fired = 0;
+        tdm_enter_low_power_listen_window();
+        low_power_last_tick = timer2_tick();
+        continue;
+      }
+      // Experimental: deep STOP until RTC alarm wakes the MCU.
+      PCON |= 0x02;
+#else
+      // Halt CPU until next interrupt. Default is IDLE (0x01), which wakes
+      // on Timer2/UART interrupts. STOP (0x02) is opt-in via compile define.
+      PCON |= LOW_POWER_MCU_SLEEP_PCON;
+#endif
       continue;
     }
 #endif
