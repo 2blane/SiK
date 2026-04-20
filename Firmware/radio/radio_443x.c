@@ -766,7 +766,9 @@ radio_configure(__pdata uint8_t air_rate)
 	//set GPIO0 & GPIO1 to control the TRX switch
 	register_write(EZRADIOPRO_GPIO0_CONFIGURATION, 0x15);	// RX state (output)
 	register_write(EZRADIOPRO_GPIO1_CONFIGURATION, 0x12);	// TX state (output)
-	//set GPIO2 to GND
+	//set GPIO2 to direct output HIGH
+	register_write(EZRADIOPRO_GPIO2_CONFIGURATION, 0x0A);	// Direct Digital Output
+	register_write(EZRADIOPRO_IO_PORT_CONFIGURATION, 0x04);	// GPIO2 output set high. Use 0x00 to make it default low.
 #elif ENABLE_RFD900_SWITCH
 	register_write(EZRADIOPRO_GPIO0_CONFIGURATION, 0x15);	// RX data (output)
 	register_write(EZRADIOPRO_GPIO1_CONFIGURATION, 0x12);	// RX data (output)

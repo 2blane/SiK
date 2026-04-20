@@ -12,3 +12,5 @@ SiK_Firmware.sublime-workspace
 Firmware/Docs
 *.xcodeproj
 .DS_Store
+.env
+scratch/*

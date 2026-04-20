@@ -14,3 +14,13 @@
 3. install dependencies `pip install pyserial`
 4. figure out what port the usb is connected to with `python3 -m serial.tools.list_ports`
 5. upload the firmware replacing the port `python3 tools/uploader.py --baudrate 115200 --port /dev/cu.usbserial-0001 dst/combined~915.hex`
+
+# Uploading Code using SI Labs Debug Adapter
+1. Need to install the ec2tools https://github.com/tridge/ec2
+2. For 433 `ec2writeflash --port=USB --mode=c2 --eraseall --run --hex Firmware/dst/combined~433.hex`
+3. For 915 `ec2writeflash --port=USB --mode=c2 --eraseall --run --hex Firmware/dst/combined~915.hex`
+
+# All in One Command to generate the firmware and then upload it to the cloud.
+```
+cd Firmware ; make clean ; make install ; cd .. ; darwincli firmware upload 4 Firmware/dst/combined~915.hex "915 version of radio software" ; darwincli firmware upload 8 Firmware/dst/combined~433.hex "433 version of radio software" ;
+```
