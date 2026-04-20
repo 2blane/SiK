@@ -684,6 +684,18 @@ radio_set_low_power_mode(bool enabled)
 }
 
 void
+radio_set_low_power_profile(enum radio_low_power_profile profile)
+{
+	(void)profile;
+}
+
+enum radio_low_power_profile
+radio_get_low_power_profile(void)
+{
+	return RADIO_LOW_POWER_XTON;
+}
+
+void
 radio_set_sleep_gpio2(bool sleeping)
 {
 	(void)sleeping;

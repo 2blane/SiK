@@ -554,6 +554,10 @@ static void
 tdm_enter_low_power_listen_window(void)
 {
   radio_set_low_power_mode(false);
+  if (radio_get_low_power_profile() == RADIO_LOW_POWER_STANDBY) {
+    // Standby wake requires oscillator/PLL settle time before reliable RX.
+    delay_msec(2);
+  }
   radio_receiver_on();
 
   low_power_state = LOW_POWER_LISTENING;
@@ -666,6 +670,7 @@ tdm_serial_loop(void)
   low_power_state = LOW_POWER_DISABLED;
   low_power_half_seconds_remaining = 0;
   low_power_last_tick = last_t;
+  radio_set_low_power_profile(RADIO_LOW_POWER_STANDBY);
 #endif
 
   _canary = 42;

@@ -309,6 +309,11 @@ enum DIVERSITY_Enum
 
 extern void radio_set_diversity(enum DIVERSITY_Enum state);
 
+enum radio_low_power_profile {
+	RADIO_LOW_POWER_XTON = 0,
+	RADIO_LOW_POWER_STANDBY = 1
+};
+
 #if defined BOARD_mro900
 
 extern void radio_set_oscillator_capacitance(uint8_t capacitance);
@@ -321,6 +326,16 @@ extern uint8_t radio_get_oscillator_capacitance(void);
 ///
 /// @param enabled		true to enter low-power hold, false to return to active mode
 extern void radio_set_low_power_mode(bool enabled);
+
+/// set the low-power profile used by radio_set_low_power_mode(true)
+///
+/// @param profile		selected radio low-power profile
+extern void radio_set_low_power_profile(enum radio_low_power_profile profile);
+
+/// get the currently selected low-power profile
+///
+/// @return		selected radio low-power profile
+extern enum radio_low_power_profile radio_get_low_power_profile(void);
 
 /// drive the EZRadioPRO GPIO2 low-power indicator level on supported boards
 ///

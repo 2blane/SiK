@@ -48,6 +48,7 @@ static volatile __bit packet_received;
 static volatile __bit preamble_detected;
 
 __pdata struct radio_settings settings;
+__pdata static enum radio_low_power_profile low_power_profile = RADIO_LOW_POWER_XTON;
 
 
 // internal helper functions
@@ -654,16 +655,35 @@ radio_set_low_power_mode(bool enabled)
 	EX0_SAVE_DISABLE;
 
 	if (enabled) {
-		// Stop RX interrupts and keep only the crystal oscillator running.
+		// Stop RX interrupts before entering low-power hold mode.
 		register_write(EZRADIOPRO_INTERRUPT_ENABLE_1, 0x00);
 		register_write(EZRADIOPRO_INTERRUPT_ENABLE_2, 0x00);
 		clear_status_registers();
 		radio_clear_transmit_fifo();
 		radio_clear_receive_fifo();
-		register_write(EZRADIOPRO_OPERATING_AND_FUNCTION_CONTROL_1, EZRADIOPRO_XTON);
+
+		if (low_power_profile == RADIO_LOW_POWER_STANDBY) {
+			// Standby hold: crystal off, mode bits cleared.
+			register_write(EZRADIOPRO_OPERATING_AND_FUNCTION_CONTROL_1, 0x00);
+		} else {
+			// XTON hold: keep crystal running for fastest wake.
+			register_write(EZRADIOPRO_OPERATING_AND_FUNCTION_CONTROL_1, EZRADIOPRO_XTON);
+		}
 	}
 
 	EX0_RESTORE;
+}
+
+void
+radio_set_low_power_profile(enum radio_low_power_profile profile)
+{
+	low_power_profile = profile;
+}
+
+enum radio_low_power_profile
+radio_get_low_power_profile(void)
+{
+	return low_power_profile;
 }
 
 void
