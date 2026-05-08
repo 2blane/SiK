@@ -34,7 +34,7 @@
 #ifndef _FREQ_HOPPING_H_
 #define _FREQ_HOPPING_H_
 
-#define MAX_FREQ_CHANNELS 10//50
+#define MAX_FREQ_CHANNELS 50//was 50 and then 10
 
 /// Randomly shuffle fixed variables for entoropy
 ///

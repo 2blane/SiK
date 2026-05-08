@@ -88,6 +88,10 @@ static __bit transmit_yield;
 static __bit blink_state;
 static __bit received_packet;
 
+#if defined BOARD_hm_trp
+static __bit low_power_led_quiet;
+#endif
+
 /// the latency in 16usec timer2 ticks for sending a zero length packet
 __pdata static uint16_t packet_latency;
 
@@ -141,6 +145,7 @@ extern uint8_t seen_mavlink;
 
 #if defined BOARD_hm_trp
 #define MAVLINK_MSG_ID_COMMAND_LONG 76
+#define MAVLINK_MSG_ID_LED_CONTROL 186
 #define MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN 246
 #define SKYBRUSH_LOW_POWER_MODE 126
 #define SKYBRUSH_RESUME_FROM_LOW_POWER_MODE 127
@@ -526,6 +531,15 @@ static void temperature_update(void)
 static void
 link_update(void)
 {
+
+#if defined BOARD_hm_trp
+  if (low_power_led_quiet) {
+    LED_RADIO = LED_OFF;
+    LED_ACTIVITY = LED_OFF;
+    return;
+  }
+#endif
+
   static uint8_t unlock_count = 10, temperature_count;
   if (received_packet) {
     unlock_count = 0;
@@ -659,6 +673,20 @@ decode_power_mode_command(__xdata uint8_t *buf, __pdata uint8_t offset)
   return -1;
 }
 
+static int8_t
+decode_led_control_command(__xdata uint8_t *buf, __pdata uint8_t offset)
+{
+  if (buf[offset+0] == 0xFF && buf[offset+1] == 0x00 && buf[offset+2] == 0x00) {
+    return SKYBRUSH_LOW_POWER_MODE;
+  }
+
+  if (buf[offset+0] == 0x00 && buf[offset+1] == 0x00 && buf[offset+2] == 0xFF) {
+    return SKYBRUSH_RESUME_FROM_LOW_POWER_MODE;
+  }
+
+  return -1;
+}
+
 static void
 tdm_enter_low_power_sleep(void)
 {
@@ -668,6 +696,9 @@ tdm_enter_low_power_sleep(void)
 
   radio_set_sleep_gpio2(true);
   radio_set_low_power_mode(true);
+  low_power_led_quiet = 1;
+  LED_RADIO = LED_OFF;
+  LED_ACTIVITY = LED_OFF;
 
   low_power_state = LOW_POWER_SLEEPING;
   low_power_half_seconds_remaining = LOW_POWER_SLEEP_HALF_SECONDS;
@@ -684,11 +715,14 @@ tdm_enter_low_power_listen_window(void)
   tdm_low_power_rtc_disable_alarm();
 #endif
   radio_set_low_power_mode(false);
+  low_power_led_quiet = 0;
   if (radio_get_low_power_profile() == RADIO_LOW_POWER_STANDBY) {
     // Standby wake requires oscillator/PLL settle time before reliable RX.
     delay_msec(2);
   }
   radio_receiver_on();
+  LED_RADIO = LED_ON;
+  LED_ACTIVITY = LED_OFF;
 
   low_power_state = LOW_POWER_LISTENING;
   low_power_half_seconds_remaining = LOW_POWER_LISTEN_HALF_SECONDS;
@@ -704,6 +738,8 @@ tdm_exit_low_power_mode(void)
   radio_set_low_power_mode(false);
   radio_set_sleep_gpio2(false);
   radio_receiver_on();
+  low_power_led_quiet = 0;
+  LED_ACTIVITY = LED_OFF;
 
   low_power_state = LOW_POWER_DISABLED;
   low_power_half_seconds_remaining = 0;
@@ -741,11 +777,20 @@ tdm_handle_low_power_command(__pdata uint8_t len, __xdata uint8_t *buf)
   low_power_command_mode = -1;
   low_power_scan_index = 0;
 
-  while (low_power_scan_index + 41 <= len) {
+  while (low_power_scan_index + 37 <= len) {
     if (buf[low_power_scan_index] == MAVLINK10_STX &&
         buf[low_power_scan_index+1] == 33 &&
         buf[low_power_scan_index+5] == MAVLINK_MSG_ID_COMMAND_LONG) {
       low_power_command_mode = decode_power_mode_command(&buf[low_power_scan_index+6], 0);
+      if (low_power_command_mode >= 0) {
+        break;
+      }
+    }
+
+    if (buf[low_power_scan_index] == MAVLINK10_STX &&
+        buf[low_power_scan_index+1] == 29 &&
+        buf[low_power_scan_index+5] == MAVLINK_MSG_ID_LED_CONTROL) {
+      low_power_command_mode = decode_led_control_command(&buf[low_power_scan_index+6], 0);
       if (low_power_command_mode >= 0) {
         break;
       }
@@ -759,6 +804,19 @@ tdm_handle_low_power_command(__pdata uint8_t len, __xdata uint8_t *buf)
         buf[low_power_scan_index+8] == 0 &&
         buf[low_power_scan_index+9] == 0) {
       low_power_command_mode = decode_power_mode_command(&buf[low_power_scan_index+10], 0);
+      if (low_power_command_mode >= 0) {
+        break;
+      }
+    }
+
+    if (low_power_scan_index + 39 <= len &&
+        buf[low_power_scan_index] == MAVLINK20_STX &&
+        buf[low_power_scan_index+1] == 29 &&
+        (buf[low_power_scan_index+2] & 0x01) == 0 &&
+        buf[low_power_scan_index+7] == MAVLINK_MSG_ID_LED_CONTROL &&
+        buf[low_power_scan_index+8] == 0 &&
+        buf[low_power_scan_index+9] == 0) {
+      low_power_command_mode = decode_led_control_command(&buf[low_power_scan_index+10], 0);
       if (low_power_command_mode >= 0) {
         break;
       }

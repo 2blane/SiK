@@ -68,7 +68,7 @@ enum ParamID {
 	PARAM_MAX				// must be last
 };
 
-#define PARAM_FORMAT_CURRENT	0x1bUL				///< current parameter format ID
+#define PARAM_FORMAT_CURRENT	0x1cUL				///< current parameter format ID
 
 /// Parameter type.
 ///

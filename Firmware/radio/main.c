@@ -343,7 +343,7 @@ radio_init(void)
 		freq_min = 915000000UL;
 		freq_max = 928000000UL;
 		txpower = 20;
-		num_fh_channels = 10;//MAX_FREQ_CHANNELS;
+		num_fh_channels = MAX_FREQ_CHANNELS;
 		break;
 	default:
 		freq_min = 0;
