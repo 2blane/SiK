@@ -143,6 +143,24 @@ static __bit send_statistics;
 /// set when we should send a MAVLink report pkt
 extern uint8_t seen_mavlink;
 
+static bool
+tdm_is_receive_only(void)
+{
+  return duty_cycle == 0;
+}
+
+static bool
+tdm_is_transmit_only(void)
+{
+  return duty_cycle == 100;
+}
+
+static bool
+tdm_is_fixed_mode(void)
+{
+  return tdm_is_receive_only() || tdm_is_transmit_only();
+}
+
 #if defined BOARD_hm_trp
 #define MAVLINK_MSG_ID_COMMAND_LONG 76
 #define MAVLINK_MSG_ID_LED_CONTROL 186
@@ -371,6 +389,22 @@ static uint16_t flight_time_estimate(__pdata uint8_t packet_len)
 static void
 sync_tx_windows(__pdata uint8_t packet_length)
 {
+  if (tdm_is_receive_only()) {
+    tdm_state = TDM_RECEIVE;
+    tdm_state_remaining = tx_window_width;
+    transmit_yield = 0;
+    bonus_transmit = 0;
+    return;
+  }
+
+  if (tdm_is_transmit_only()) {
+    tdm_state = TDM_TRANSMIT;
+    tdm_state_remaining = tx_window_width;
+    transmit_yield = 0;
+    bonus_transmit = 0;
+    return;
+  }
+
   __data enum tdm_state old_state = tdm_state;
   __pdata uint16_t old_remaining = tdm_state_remaining;
   
@@ -431,6 +465,24 @@ sync_tx_windows(__pdata uint8_t packet_length)
 static void
 tdm_state_update(__pdata uint16_t tdelta)
 {
+  if (tdm_is_receive_only()) {
+    tdm_state = TDM_RECEIVE;
+    tdm_state_remaining = tx_window_width;
+    transmit_yield = 0;
+    bonus_transmit = 0;
+    transmit_wait = 0;
+    return;
+  }
+
+  if (tdm_is_transmit_only()) {
+    tdm_state = TDM_TRANSMIT;
+    tdm_state_remaining = tx_window_width;
+    transmit_yield = 0;
+    bonus_transmit = 0;
+    transmit_wait = 0;
+    return;
+  }
+
   // update the amount of time we are waiting for a preamble
   // to turn into a real packet
   if (tdelta > transmit_wait) {
@@ -868,6 +920,17 @@ tdm_serial_loop(void)
 #endif
 
   _canary = 42;
+
+  if (tdm_is_receive_only()) {
+    tdm_state = TDM_RECEIVE;
+    tdm_state_remaining = tx_window_width;
+    radio_set_channel(fhop_receive_channel());
+    radio_receiver_on();
+  } else if (tdm_is_transmit_only()) {
+    tdm_state = TDM_TRANSMIT;
+    tdm_state_remaining = tx_window_width;
+    radio_set_channel(fhop_transmit_channel());
+  }
   
   for (;;) {
     if (_canary != 42) {
@@ -932,36 +995,37 @@ tdm_serial_loop(void)
       }
     }
     
-    // set right receive channel
-    radio_set_channel(fhop_receive_channel());
-    
-    // get the time before we check for a packet coming in
-    tnow = timer2_tick();
-    
-    // see if we have received a packet
-    if (radio_receive_packet(&len, pbuf)) {
+    if (!tdm_is_transmit_only()) {
+      // set right receive channel
+      radio_set_channel(fhop_receive_channel());
+
+      // get the time before we check for a packet coming in
+      tnow = timer2_tick();
+
+      // see if we have received a packet
+      if (radio_receive_packet(&len, pbuf)) {
       
-      // update the activity indication
-      received_packet = true;
-      fhop_set_locked(true);
+        // update the activity indication
+        received_packet = true;
+        fhop_set_locked(true);
       
-      // update filtered RSSI value and packet stats
-      statistics.average_rssi = (radio_last_rssi() + 7*(uint16_t)statistics.average_rssi)/8;
-      statistics.receive_count++;
+        // update filtered RSSI value and packet stats
+        statistics.average_rssi = (radio_last_rssi() + 7*(uint16_t)statistics.average_rssi)/8;
+        statistics.receive_count++;
       
-      // we're not waiting for a preamble
-      // any more
-      transmit_wait = 0;
+        // we're not waiting for a preamble
+        // any more
+        transmit_wait = 0;
       
-      if (len < 2) {
-        // not a valid packet. We always send
-        // two control bytes at the end of every packet
-        continue;
-      }
+        if (len < 2) {
+          // not a valid packet. We always send
+          // two control bytes at the end of every packet
+          continue;
+        }
       
-      // extract control bytes from end of packet
-      memcpy(&trailer, &pbuf[len-sizeof(trailer)], sizeof(trailer));
-      len -= sizeof(trailer);
+        // extract control bytes from end of packet
+        memcpy(&trailer, &pbuf[len-sizeof(trailer)], sizeof(trailer));
+        len -= sizeof(trailer);
 
 #if defined BOARD_hm_trp
       if (len != 0 && trailer.command == 0) {
@@ -969,7 +1033,7 @@ tdm_serial_loop(void)
       }
 #endif
       
-      if (trailer.window == 0 && len != 0) {
+        if (trailer.window == 0 && len != 0) {
         // its a control packet
         if (len == sizeof(struct statistics)) {
           memcpy(&remote_statistics, pbuf, len);
@@ -977,7 +1041,7 @@ tdm_serial_loop(void)
         
         // don't count control packets in the stats
         statistics.receive_count--;
-      } else if (trailer.window != 0) {
+        } else if (trailer.window != 0) {
         // sync our transmit windows based on
         // received header
         sync_tx_windows(len);
@@ -1019,8 +1083,9 @@ tdm_serial_loop(void)
 #endif // INCLUDE_AES
           
         }
+        }
+        continue;
       }
-      continue;
     }
     
     // see how many 16usec ticks have passed and update
@@ -1098,19 +1163,25 @@ tdm_serial_loop(void)
       continue;
     }
     
-    // how many bytes could we transmit in the time we
-    // have left?
-    if (tdm_state_remaining < packet_latency) {
-      // none ....
-      continue;
+    // In fixed transmit-only mode, use the full packet size instead of
+    // a TDM window-derived transmit budget.
+    if (tdm_is_transmit_only()) {
+      max_xmit = max_data_packet_length;
+    } else {
+      // how many bytes could we transmit in the time we
+      // have left?
+      if (tdm_state_remaining < packet_latency) {
+        // none ....
+        continue;
+      }
+      max_xmit = (tdm_state_remaining - packet_latency) / ticks_per_byte;
+      if (max_xmit < PACKET_OVERHEAD) {
+        // can't fit the trailer in with a byte to spare
+        continue;
+      }
+      //max_xmit -= PACKET_OVERHEAD;
+      max_xmit -= sizeof(trailer)+1;
     }
-    max_xmit = (tdm_state_remaining - packet_latency) / ticks_per_byte;
-    if (max_xmit < PACKET_OVERHEAD) {
-      // can't fit the trailer in with a byte to spare
-      continue;
-    }
-    //max_xmit -= PACKET_OVERHEAD;
-    max_xmit -= sizeof(trailer)+1;
     
 #ifdef INCLUDE_AES
     if (aes_get_encryption_level() > 0) {
@@ -1174,6 +1245,8 @@ tdm_serial_loop(void)
       // mark a stats packet with a zero window
       trailer.window = 0;
       trailer.resend = 0;
+    } else if (tdm_is_transmit_only()) {
+      trailer.window = tx_window_width;
     } else {
       // calculate the control word as the number of
       // 16usec ticks that will be left in this
@@ -1220,7 +1293,8 @@ tdm_serial_loop(void)
     }
     
     // start transmitting the packet
-    if (!radio_transmit(len + sizeof(trailer), pbuf, tdm_state_remaining + (silence_period/2)) &&
+    if (!radio_transmit(len + sizeof(trailer), pbuf,
+                        tdm_is_transmit_only() ? 0xFFFF : (tdm_state_remaining + (silence_period/2))) &&
         len != 0 && trailer.window != 0 && trailer.command == 0) {
       packet_force_resend();
     }
@@ -1252,11 +1326,13 @@ tdm_serial_loop(void)
 #endif // INCLUDE_AES
 
 
-    // set right receive channel
-    radio_set_channel(fhop_receive_channel());
-    
-    // re-enable the receiver
-    radio_receiver_on();
+    if (!tdm_is_transmit_only()) {
+      // set right receive channel
+      radio_set_channel(fhop_receive_channel());
+
+      // re-enable the receiver
+      radio_receiver_on();
+    }
     
   }
 #endif // RADIO_SPLAT_TESTING_MODE
@@ -1448,7 +1524,11 @@ tdm_init(void)
 
 	// tell the packet subsystem our max packet size, which it
 	// needs to know for MAVLink packet boundary detection
-	i = (tx_window_width - packet_latency) / ticks_per_byte;
+  if (tdm_is_fixed_mode()) {
+    i = max_data_packet_length;
+  } else {
+    i = (tx_window_width - packet_latency) / ticks_per_byte;
+  }
 	if (i > max_data_packet_length) {
 		i = max_data_packet_length;
 	}

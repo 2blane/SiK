@@ -36,6 +36,7 @@
 #include "radio.h"
 #include "freq_hopping.h"
 #include "crc.h"
+#include "tdm.h"
 
 /// how many channels are we hopping over
 __pdata uint8_t num_fh_channels;
@@ -117,10 +118,19 @@ fhop_init(void)
 	shuffle(channel_map, num_fh_channels);
 }
 
+static bool
+fhop_single_channel_mode(void)
+{
+	return num_fh_channels <= 1 || duty_cycle == 0 || duty_cycle == 100;
+}
+
 // tell the TDM code what channel to transmit on
 uint8_t 
 fhop_transmit_channel(void)
 {
+	if (fhop_single_channel_mode()) {
+		return channel_map[0];
+	}
 	return channel_map[transmit_channel];
 }
 
@@ -128,6 +138,9 @@ fhop_transmit_channel(void)
 uint8_t 
 fhop_receive_channel(void)
 {
+	if (fhop_single_channel_mode()) {
+		return channel_map[0];
+	}
 	return channel_map[receive_channel];
 }
 
@@ -135,6 +148,12 @@ fhop_receive_channel(void)
 void 
 fhop_window_change(void)
 {
+	if (fhop_single_channel_mode()) {
+		transmit_channel = 0;
+		receive_channel = 0;
+		return;
+	}
+
 	transmit_channel = (transmit_channel + 1) % num_fh_channels;
 	if (have_radio_lock) {
 		// when we have lock, the receive channel follows the
@@ -152,6 +171,13 @@ fhop_window_change(void)
 void 
 fhop_set_locked(bool locked)
 {
+	if (fhop_single_channel_mode()) {
+		have_radio_lock = true;
+		transmit_channel = 0;
+		receive_channel = 0;
+		return;
+	}
+
 #if DEBUG
 	if (locked && !have_radio_lock) {
 		debug("FH lock\n");

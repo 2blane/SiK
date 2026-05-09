@@ -402,6 +402,12 @@ radio_init(void)
 	duty_cycle = constrain(duty_cycle, 0, 100);
 	param_set(PARAM_DUTY_CYCLE, duty_cycle);
 
+	// In fixed receive-only or broadcast-only modes, force a single
+	// operating channel to avoid any hopping ambiguity.
+	if (duty_cycle == 0 || duty_cycle == 100) {
+		num_fh_channels = 1;
+	}
+
 	// get the LBT threshold we will use
 	lbt_rssi = param_get(PARAM_LBT_RSSI);
 	if (lbt_rssi != 0) {
