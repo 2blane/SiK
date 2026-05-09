@@ -1,6 +1,8 @@
 export type RadioRole = 'left' | 'right';
 export type RadioMode = 'broadcast' | 'receive' | 'peer';
-export type LedColor = 'red' | 'blue' | 'green' | 'white';
+export type LedColor = 'red' | 'blue' | 'green' | 'white' | 'black' | 'yellow' | 'purple' | 'custom';
+export type PowerCommand = 'sleep' | 'power-on';
+export type ReceiverCommand = LedColor | PowerCommand;
 
 export interface UsbPort {
   path: string;
@@ -47,7 +49,7 @@ export interface SerialFrame {
 
 export interface CommandReceivedEvent {
   role: RadioRole;
-  color: LedColor;
+  color: ReceiverCommand;
   timestamp: number;
 }
 
@@ -68,6 +70,7 @@ export interface InitPayload {
     left: string;
     right: string;
   };
+  customColor: string;
 }
 
 export interface SikApi {
@@ -77,9 +80,11 @@ export interface SikApi {
   disconnectRadio: (role: RadioRole) => Promise<RadioState>;
   refreshRadioStats: (role: RadioRole) => Promise<RadioState>;
   setPreferredPort: (role: RadioRole, portPath: string) => Promise<{ left: string; right: string }>;
+  setCustomColor: (color: string) => Promise<{ customColor: string }>;
   setDutyCycle: (role: RadioRole, dutyCycle: number) => Promise<RadioState>;
   uploadFirmware: (role: RadioRole, portPath: string) => Promise<FirmwareUploadResult>;
-  sendLedCommand: (color: LedColor) => Promise<{ ok: boolean }>;
+  sendLedCommand: (color: LedColor, customColor?: string) => Promise<{ ok: boolean }>;
+  sendPowerCommand: (command: PowerCommand) => Promise<{ ok: boolean }>;
   onPortsChanged: (callback: (ports: UsbPort[]) => void) => () => void;
   onRadioStatus: (callback: (status: RadioState) => void) => () => void;
   onSerialData: (callback: (frame: SerialFrame) => void) => () => void;

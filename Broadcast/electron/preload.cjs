@@ -7,9 +7,11 @@ contextBridge.exposeInMainWorld('sik', {
   disconnectRadio: (role) => ipcRenderer.invoke('radio:disconnect', role),
   refreshRadioStats: (role) => ipcRenderer.invoke('radio:refreshStats', role),
   setPreferredPort: (role, portPath) => ipcRenderer.invoke('settings:setPreferredPort', role, portPath),
+  setCustomColor: (color) => ipcRenderer.invoke('settings:setCustomColor', color),
   setDutyCycle: (role, dutyCycle) => ipcRenderer.invoke('radio:setDutyCycle', role, dutyCycle),
   uploadFirmware: (role, portPath) => ipcRenderer.invoke('radio:uploadFirmware', role, portPath),
-  sendLedCommand: (color) => ipcRenderer.invoke('radio:sendLed', color),
+  sendLedCommand: (color, customColor) => ipcRenderer.invoke('radio:sendLed', color, customColor),
+  sendPowerCommand: (command) => ipcRenderer.invoke('radio:sendPowerCommand', command),
   onPortsChanged: (callback) => {
     const handler = (_event, payload) => callback(payload);
     ipcRenderer.on('ports:changed', handler);

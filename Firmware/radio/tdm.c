@@ -783,6 +783,10 @@ tdm_enter_low_power_listen_window(void)
 static void
 tdm_exit_low_power_mode(void)
 {
+  if (low_power_state == LOW_POWER_DISABLED) {
+    return;
+  }
+
 #if LOW_POWER_EXPERIMENTAL_DEEP_SLEEP
   tdm_low_power_rtc_disable_alarm();
   low_power_rtc_alarm_fired = 0;

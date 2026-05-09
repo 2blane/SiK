@@ -20,21 +20,42 @@ const LED_TO_RELAY_INDEX = {
   red: 1,
   blue: 2,
   green: 3,
-  white: 4
+  white: 4,
+  black: 5,
+  yellow: 6,
+  purple: 7,
+  custom: 8
 };
 
 const RELAY_INDEX_TO_COLOR = {
   1: 'red',
   2: 'blue',
   3: 'green',
-  4: 'white'
+  4: 'white',
+  5: 'black',
+  6: 'yellow',
+  7: 'purple',
+  8: 'custom'
+};
+
+const COLOR_TO_RGB = {
+  red: [255, 0, 0],
+  blue: [0, 0, 255],
+  green: [0, 255, 0],
+  white: [255, 255, 255],
+  black: [0, 0, 0],
+  yellow: [255, 255, 0],
+  purple: [128, 0, 255]
 };
 
 const MAVLINK_MSG_ID_COMMAND_LONG = 76;
 const MAVLINK_COMMAND_DO_SET_RELAY = 181;
+const MAVLINK_COMMAND_PREFLIGHT_REBOOT_SHUTDOWN = 246;
 const MAVLINK_SYSTEM_ID_GCS = 255;
 const MAVLINK_COMPONENT_ID_GCS = 190;
 const MAVLINK_COMMAND_LONG_CRC_EXTRA = 152;
+const SKYBRUSH_LOW_POWER_MODE = 126;
+const SKYBRUSH_RESUME_FROM_LOW_POWER_MODE = 127;
 
 let mavlinkSequence = 0;
 
@@ -46,7 +67,8 @@ const settingsDefaults = {
   dutyCycles: {
     left: 100,
     right: 0
-  }
+  },
+  customColor: '#ff8800'
 };
 
 const radios = {
@@ -376,6 +398,20 @@ function parseAti5Response(rawValue) {
   return entries;
 }
 
+function hexToRgb(color) {
+  const normalized = String(color || '').trim();
+  const match = normalized.match(/^#?([0-9a-fA-F]{6})$/);
+  if (!match) {
+    return [255, 136, 0];
+  }
+
+  return [
+    Number.parseInt(match[1].slice(0, 2), 16),
+    Number.parseInt(match[1].slice(2, 4), 16),
+    Number.parseInt(match[1].slice(4, 6), 16)
+  ];
+}
+
 async function queryRadioStats(port, role = 'unknown') {
   emitStatsDebug(role, 'Starting radio stats query.');
 
@@ -525,7 +561,8 @@ function readSettings() {
       dutyCycles: {
         left: Number.isFinite(parsed?.dutyCycles?.left) ? parsed.dutyCycles.left : settingsDefaults.dutyCycles.left,
         right: Number.isFinite(parsed?.dutyCycles?.right) ? parsed.dutyCycles.right : settingsDefaults.dutyCycles.right
-      }
+      },
+      customColor: typeof parsed?.customColor === 'string' ? parsed.customColor : settingsDefaults.customColor
     };
   } catch {
     return structuredClone(settingsDefaults);
@@ -612,21 +649,56 @@ function x25Crc(buffer, crcExtra) {
   return crc;
 }
 
-function buildMavlinkCommandLongRelayPacket(color) {
+function buildMavlinkCommandLongRelayPacket(color, customColor = settingsDefaults.customColor) {
   const relayIndex = LED_TO_RELAY_INDEX[color] ?? LED_TO_RELAY_INDEX.white;
+  const rgb = color === 'custom' ? hexToRgb(customColor) : (COLOR_TO_RGB[color] ?? COLOR_TO_RGB.white);
   const payload = Buffer.alloc(33);
 
   payload.writeFloatLE(relayIndex, 0); // param1 relay number
   payload.writeFloatLE(1.0, 4);        // param2 relay on
-  payload.writeFloatLE(0.0, 8);        // param3
-  payload.writeFloatLE(0.0, 12);       // param4
-  payload.writeFloatLE(0.0, 16);       // param5
+  payload.writeFloatLE(rgb[0], 8);     // param3 red
+  payload.writeFloatLE(rgb[1], 12);    // param4 green
+  payload.writeFloatLE(rgb[2], 16);    // param5 blue
   payload.writeFloatLE(0.0, 20);       // param6
   payload.writeFloatLE(0.0, 24);       // param7
   payload.writeUInt16LE(MAVLINK_COMMAND_DO_SET_RELAY, 28);
   payload.writeUInt8(0, 30);           // target_system (broadcast)
   payload.writeUInt8(0, 31);           // target_component (broadcast)
   payload.writeUInt8(0, 32);           // confirmation
+
+  const header = Buffer.from([
+    0xfe,
+    payload.length,
+    mavlinkSequence,
+    MAVLINK_SYSTEM_ID_GCS,
+    MAVLINK_COMPONENT_ID_GCS,
+    MAVLINK_MSG_ID_COMMAND_LONG
+  ]);
+
+  mavlinkSequence = (mavlinkSequence + 1) & 0xff;
+
+  const crcInput = Buffer.concat([header.subarray(1), payload]);
+  const crc = x25Crc(crcInput, MAVLINK_COMMAND_LONG_CRC_EXTRA);
+  const checksum = Buffer.from([crc & 0xff, (crc >> 8) & 0xff]);
+
+  return Buffer.concat([header, payload, checksum]);
+}
+
+function buildSkybrushPowerCommandPacket(command) {
+  const payload = Buffer.alloc(33);
+  const modeValue = command === 'sleep' ? SKYBRUSH_LOW_POWER_MODE : SKYBRUSH_RESUME_FROM_LOW_POWER_MODE;
+
+  payload.writeFloatLE(modeValue, 0);
+  payload.writeFloatLE(0.0, 4);
+  payload.writeFloatLE(0.0, 8);
+  payload.writeFloatLE(0.0, 12);
+  payload.writeFloatLE(0.0, 16);
+  payload.writeFloatLE(0.0, 20);
+  payload.writeFloatLE(0.0, 24);
+  payload.writeUInt16LE(MAVLINK_COMMAND_PREFLIGHT_REBOOT_SHUTDOWN, 28);
+  payload.writeUInt8(0, 30);
+  payload.writeUInt8(0, 31);
+  payload.writeUInt8(0, 32);
 
   const header = Buffer.from([
     0xfe,
@@ -686,18 +758,30 @@ function parseMavlinkFrames(role, bytes) {
 
     const payload = frame.subarray(6, 6 + payloadLength);
     const command = payload.readUInt16LE(28);
-    if (command !== MAVLINK_COMMAND_DO_SET_RELAY) {
+
+    if (command === MAVLINK_COMMAND_DO_SET_RELAY) {
+      const relayIndex = Math.round(payload.readFloatLE(0));
+      const mappedColor = RELAY_INDEX_TO_COLOR[relayIndex];
+      if (mappedColor) {
+        sendToRenderer('radio:commandReceived', {
+          role,
+          color: mappedColor,
+          timestamp: Date.now()
+        });
+      }
       continue;
     }
 
-    const relayIndex = Math.round(payload.readFloatLE(0));
-    const mappedColor = RELAY_INDEX_TO_COLOR[relayIndex];
-    if (mappedColor) {
-      sendToRenderer('radio:commandReceived', {
-        role,
-        color: mappedColor,
-        timestamp: Date.now()
-      });
+    if (command === MAVLINK_COMMAND_PREFLIGHT_REBOOT_SHUTDOWN) {
+      const modeValue = Math.round(payload.readFloatLE(0));
+      const mappedPower = modeValue === SKYBRUSH_LOW_POWER_MODE ? 'sleep' : modeValue === SKYBRUSH_RESUME_FROM_LOW_POWER_MODE ? 'power-on' : null;
+      if (mappedPower) {
+        sendToRenderer('radio:commandReceived', {
+          role,
+          color: mappedPower,
+          timestamp: Date.now()
+        });
+      }
     }
   }
 
@@ -949,7 +1033,8 @@ ipcMain.handle('app:init', async () => {
       left: serializeRadio(radios.left),
       right: serializeRadio(radios.right)
     },
-    preferredPorts: settings.preferredPorts
+    preferredPorts: settings.preferredPorts,
+    customColor: settings.customColor
   };
 });
 
@@ -979,6 +1064,38 @@ ipcMain.handle('settings:setPreferredPort', async (_event, role, portPath) => {
   writeSettings(settings);
   return settings.preferredPorts;
 });
+
+ipcMain.handle('settings:setCustomColor', async (_event, color) => {
+  const settings = readSettings();
+  settings.customColor = typeof color === 'string' ? color : settingsDefaults.customColor;
+  writeSettings(settings);
+  return { customColor: settings.customColor };
+});
+
+async function ensureRadiosInDataModeForSend() {
+  const leftRadio = radios.left;
+  const rightRadio = radios.right;
+
+  if (!leftRadio.port || !leftRadio.port.isOpen) {
+    throw new Error('Broadcast radio is not connected.');
+  }
+
+  if (leftRadio.mode !== 'broadcast') {
+    throw new Error('Broadcast radio must have DUTY_CYCLE=100 to send broadcast commands.');
+  }
+
+  if (leftRadio.atMode) {
+    emitStatsDebug('left', 'Broadcast radio is in AT mode; exiting to data mode before command send.');
+    await exitAtMode(leftRadio.port, 'left');
+  }
+
+  if (rightRadio.port && rightRadio.port.isOpen && rightRadio.atMode) {
+    emitStatsDebug('right', 'Receiver radio is in AT mode; exiting to data mode before command send.');
+    await exitAtMode(rightRadio.port, 'right');
+  }
+
+  return { leftRadio, rightRadio };
+}
 
 ipcMain.handle('radio:setDutyCycle', async (_event, role, dutyCycleValue) => {
   const radioRole = role === 'right' ? 'right' : 'left';
@@ -1046,32 +1163,38 @@ ipcMain.handle('radio:setDutyCycle', async (_event, role, dutyCycleValue) => {
   return serializeRadio(radio);
 });
 
-ipcMain.handle('radio:sendLed', async (_event, color) => {
-  const safeColor = ['red', 'blue', 'green', 'white'].includes(color) ? color : 'white';
-  const payload = buildMavlinkCommandLongRelayPacket(safeColor);
-  const leftRadio = radios.left;
-  const rightRadio = radios.right;
-
-  if (!leftRadio.port || !leftRadio.port.isOpen) {
-    throw new Error('Broadcast radio is not connected.');
-  }
-
-  if (leftRadio.mode !== 'broadcast') {
-    throw new Error('Broadcast radio must have DUTY_CYCLE=100 to send broadcast LED commands.');
-  }
-
-  if (leftRadio.atMode) {
-    emitStatsDebug('left', 'Broadcast radio is in AT mode; exiting to data mode before LED send.');
-    await exitAtMode(leftRadio.port, 'left');
-  }
-
-  if (rightRadio.port && rightRadio.port.isOpen && rightRadio.atMode) {
-    emitStatsDebug('right', 'Receiver radio is in AT mode; exiting to data mode before LED send.');
-    await exitAtMode(rightRadio.port, 'right');
-  }
+ipcMain.handle('radio:sendLed', async (_event, color, customColor) => {
+  const safeColor = ['red', 'blue', 'green', 'white', 'black', 'yellow', 'purple', 'custom'].includes(color) ? color : 'white';
+  const payload = buildMavlinkCommandLongRelayPacket(safeColor, customColor);
+  const { leftRadio } = await ensureRadiosInDataModeForSend();
 
   await writeToPort(leftRadio.port, payload);
-  emitByteFrame('left', 'tx', payload, `led-${safeColor}`);
+  emitByteFrame('left', 'tx', payload, safeColor === 'custom' ? `led-custom-${customColor ?? readSettings().customColor}` : `led-${safeColor}`);
+
+  return { ok: true };
+});
+
+ipcMain.handle('radio:sendPowerCommand', async (_event, command) => {
+  const safeCommand = command === 'sleep' ? 'sleep' : 'power-on';
+  const { leftRadio } = await ensureRadiosInDataModeForSend();
+
+  if (safeCommand === 'power-on') {
+    const sendCount = 40;
+
+    for (let index = 0; index < sendCount; index += 1) {
+      const payload = buildSkybrushPowerCommandPacket(safeCommand);
+      await writeToPort(leftRadio.port, payload);
+      emitByteFrame('left', 'tx', payload, `${safeCommand}-${index + 1}/${sendCount}`);
+
+      if (index + 1 < sendCount) {
+        await sleep(250);
+      }
+    }
+  } else {
+    const payload = buildSkybrushPowerCommandPacket(safeCommand);
+    await writeToPort(leftRadio.port, payload);
+    emitByteFrame('left', 'tx', payload, safeCommand);
+  }
 
   return { ok: true };
 });

@@ -24,3 +24,21 @@
 ```
 cd Firmware ; make clean ; make install ; cd .. ; darwincli firmware upload 4 Firmware/dst/combined~915.hex "915 version of radio software" ; darwincli firmware upload 8 Firmware/dst/combined~433.hex "433 version of radio software" ;
 ```
+
+# Broadcasting
+We have modified this firmware to support broadcasting.
+If you set DUTY_CYCLE to 100 then the radio will become a broadcaster/transmitter only.
+If you set DUTY_CYCLE to 0 then the radio will become a receiver only.
+In either of these modes, the NUM_CHANNELS will get overwritten to 1, there is no hopping,
+and no differing window sizes. So we should get the best communication this way.
+
+# Broadcast App
+We have created an electron app under Broadcast. You can run by going into the Broadcast folder and running:
+`npm run dev`
+This will run the app and allow you to connect two radios. Give it a second to read the params from the radios in AT Mode.
+You can also send commands and see the radio's response. This is great for debugging the radio firmware.
+
+# Sleep Mode
+Sleep mode works by sending a MavLink sleep command to the drones. Once picked up, the drones will enter a sleep mode
+for 10 seconds, then come alive for 1 second and look for a power up command. If they receive a power up command they will
+turn on completely. If they do not, then the drone will remain off.

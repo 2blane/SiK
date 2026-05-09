@@ -30,9 +30,38 @@ body {
 }
 
 .shell {
+  position: relative;
   width: min(1500px, 96vw);
   margin: 0 auto;
   padding: 1.2rem 1.2rem 1.6rem;
+}
+
+.blocking-popover {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: rgba(3, 8, 14, 0.72);
+  backdrop-filter: blur(5px);
+}
+
+.blocking-popover__card {
+  width: min(32rem, calc(100vw - 2rem));
+  border: 1px solid rgba(162, 214, 255, 0.25);
+  border-radius: 16px;
+  padding: 1.2rem 1.3rem;
+  background: linear-gradient(135deg, rgba(17, 36, 54, 0.96), rgba(8, 14, 22, 0.96));
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.35);
+}
+
+.blocking-popover__card h2 {
+  margin: 0;
+}
+
+.blocking-popover__card p {
+  margin: 0.55rem 0 0;
+  color: var(--muted);
 }
 
 .header {
@@ -215,6 +244,15 @@ input {
   gap: 0.6rem;
 }
 
+.command-grid.compact {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.command-grid.two-up {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .led {
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 10px;
@@ -224,6 +262,11 @@ input {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   cursor: pointer;
+}
+
+.led.small {
+  padding: 0.55rem 0.45rem;
+  font-size: 0.76rem;
 }
 
 .led.red {
@@ -242,6 +285,37 @@ input {
   background: linear-gradient(130deg, #f9fafc, #d4d9e3);
 }
 
+.led.black {
+  background: linear-gradient(130deg, #37414e, #0f141d);
+  color: #f3f8ff;
+}
+
+.led.yellow {
+  background: linear-gradient(130deg, #ffe27a, #d6aa18);
+}
+
+.led.purple {
+  background: linear-gradient(130deg, #c79cff, #7640d8);
+  color: #f6f0ff;
+}
+
+.led.custom-color-button {
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.led.power-button {
+  background: linear-gradient(130deg, #9ec8ff, #42608b);
+  color: #071016;
+}
+
+.led.power-button.sleep {
+  background: linear-gradient(130deg, #f1c07a, #a85e2f);
+}
+
+.led.power-button.power-on {
+  background: linear-gradient(130deg, #8be0b6, #348c64);
+}
+
 .led:disabled {
   cursor: not-allowed;
   opacity: 0.42;
@@ -257,6 +331,35 @@ input {
   border-style: solid;
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35), 0 0 28px rgba(129, 230, 255, 0.6);
   animation: receive-pulse 0.9s ease;
+}
+
+.custom-color-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.color-picker-label {
+  display: flex;
+  gap: 0.7rem;
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.color-picker-label input[type="color"] {
+  width: 3rem;
+  min-width: 3rem;
+  height: 2rem;
+  padding: 0.1rem;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+@media (max-width: 1080px) {
+  .command-grid.compact {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .bytes {
@@ -277,6 +380,12 @@ pre {
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.log-output {
+  max-height: 220px;
+  min-height: 220px;
+  overflow: auto;
 }
 
 @keyframes receive-pulse {

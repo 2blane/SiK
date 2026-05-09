@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   CommandReceivedEvent,
   FirmwareUploadResult,
   LedColor,
+  PowerCommand,
   RadioRole,
   RadioState,
+  ReceiverCommand,
   SikApi,
   UsbPort,
   SerialFrame,
@@ -20,19 +22,22 @@ const emptyRadio = (role: RadioRole): RadioState => ({
   stats: null,
 });
 
-const commandColors: LedColor[] = ['red', 'blue', 'green', 'white'];
+const commandColors: LedColor[] = ['red', 'blue', 'green', 'white', 'black', 'yellow', 'purple', 'custom'];
+const powerCommands: PowerCommand[] = ['sleep', 'power-on'];
 
 const browserFallbackApi: SikApi = {
   init: async () => ({
     ports: [],
     radios: { left: emptyRadio('left'), right: emptyRadio('right') },
     preferredPorts: { left: '', right: '' },
+    customColor: '#ff8800',
   }),
   listPorts: async () => [],
   connectRadio: async (role) => emptyRadio(role),
   disconnectRadio: async (role) => emptyRadio(role),
   refreshRadioStats: async (role) => emptyRadio(role),
   setPreferredPort: async () => ({ left: '', right: '' }),
+  setCustomColor: async (color) => ({ customColor: color }),
   setDutyCycle: async (role, dutyCycle) => ({
     ...emptyRadio(role),
     dutyCycle,
@@ -45,6 +50,7 @@ const browserFallbackApi: SikApi = {
     output: '',
   }),
   sendLedCommand: async () => ({ ok: true }),
+  sendPowerCommand: async () => ({ ok: true }),
   onPortsChanged: () => () => undefined,
   onRadioStatus: () => () => undefined,
   onSerialData: () => () => undefined,
@@ -93,6 +99,21 @@ function modeLabelFromDutyCycle(dutyCycle: number): string {
   return 'custom';
 }
 
+function colorButtonLabel(color: LedColor): string {
+  if (color === 'custom') {
+    return 'custom';
+  }
+  return color;
+}
+
+function colorButtonClass(color: LedColor): string {
+  return color === 'custom' ? 'custom-color-button' : color;
+}
+
+function powerButtonLabel(command: PowerCommand): string {
+  return command === 'power-on' ? 'power on' : 'sleep';
+}
+
 function App() {
   const [ports, setPorts] = useState<UsbPort[]>([]);
   const [leftRadio, setLeftRadio] = useState<RadioState>(emptyRadio('left'));
@@ -104,12 +125,22 @@ function App() {
   const [statusText, setStatusText] = useState('Waiting for USB radios...');
   const [uploadingRole, setUploadingRole] = useState<RadioRole | null>(null);
   const [refreshingRole, setRefreshingRole] = useState<RadioRole | null>(null);
-  const [rightCommandFlashAt, setRightCommandFlashAt] = useState<Record<LedColor, number>>({
+  const [wakeInProgress, setWakeInProgress] = useState(false);
+  const [customColor, setCustomColor] = useState('#ff8800');
+  const [rightCommandFlashAt, setRightCommandFlashAt] = useState<Record<ReceiverCommand, number>>({
     red: 0,
     blue: 0,
     green: 0,
     white: 0,
+    black: 0,
+    yellow: 0,
+    purple: 0,
+    custom: 0,
+    sleep: 0,
+    'power-on': 0,
   });
+  const txLogRef = useRef<HTMLPreElement | null>(null);
+  const rxLogRef = useRef<HTMLPreElement | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -125,6 +156,7 @@ function App() {
       setRightRadio(payload.radios.right);
       setLeftPortPath(payload.preferredPorts.left);
       setRightPortPath(payload.preferredPorts.right);
+      setCustomColor(payload.customColor);
       setStatusText('Ready. Select USB radios or rely on saved auto-connect.');
     };
 
@@ -145,10 +177,10 @@ function App() {
     const offSerial = sikApi.onSerialData((frame) => {
       const line = formatFrameLine(frame);
       if (frame.role === 'left' && frame.direction === 'tx') {
-        setTxFrames((prev) => [line, ...prev].slice(0, 160));
+        setTxFrames((prev) => [...prev, line].slice(-160));
       }
       if (frame.role === 'right' && frame.direction === 'rx') {
-        setRxFrames((prev) => [line, ...prev].slice(0, 160));
+        setRxFrames((prev) => [...prev, line].slice(-160));
       }
     });
 
@@ -174,7 +206,23 @@ function App() {
     return ports.map((port) => ({ value: port.path, label: formatPortLabel(port) }));
   }, [ports]);
 
+  useEffect(() => {
+    if (txLogRef.current) {
+      txLogRef.current.scrollTop = txLogRef.current.scrollHeight;
+    }
+  }, [txFrames]);
+
+  useEffect(() => {
+    if (rxLogRef.current) {
+      rxLogRef.current.scrollTop = rxLogRef.current.scrollHeight;
+    }
+  }, [rxFrames]);
+
   const onSelectPort = async (role: RadioRole, portPath: string) => {
+    if (wakeInProgress) {
+      return;
+    }
+
     if (role === 'left') {
       setLeftPortPath(portPath);
     } else {
@@ -199,6 +247,10 @@ function App() {
   };
 
   const onSetDutyCycle = async (role: RadioRole, value: string) => {
+    if (wakeInProgress) {
+      return;
+    }
+
     const parsed = Number.parseInt(value, 10);
     if (!Number.isFinite(parsed)) {
       return;
@@ -215,6 +267,10 @@ function App() {
   };
 
   const onApplyRoleMode = async (role: RadioRole, dutyCycle: number) => {
+    if (wakeInProgress) {
+      return;
+    }
+
     try {
       await sikApi.setDutyCycle(role, dutyCycle);
       setStatusText(`${role === 'left' ? 'Broadcast' : 'Receiver'} role applied with DUTY_CYCLE=${dutyCycle}.`);
@@ -225,6 +281,10 @@ function App() {
   };
 
   const onRefreshStats = async (role: RadioRole) => {
+    if (wakeInProgress) {
+      return;
+    }
+
     setRefreshingRole(role);
     try {
       const radio = await sikApi.refreshRadioStats(role);
@@ -242,16 +302,62 @@ function App() {
   };
 
   const onSendLed = async (color: LedColor) => {
+    if (wakeInProgress) {
+      return;
+    }
+
     try {
-      await sikApi.sendLedCommand(color);
-      setStatusText(`LED ${color.toUpperCase()} MAVLink command sent from broadcast radio.`);
+      await sikApi.sendLedCommand(color, customColor);
+      setStatusText(`${color === 'custom' ? `Custom color ${customColor}` : `LED ${color.toUpperCase()}`} MAVLink command sent from broadcast radio.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to send LED command.';
       setStatusText(message);
     }
   };
 
+  const onCustomColorChange = async (value: string) => {
+    if (wakeInProgress) {
+      return;
+    }
+
+    setCustomColor(value);
+    try {
+      await sikApi.setCustomColor(value);
+    } catch {
+      // Keep local UI state even if persistence fails.
+    }
+  };
+
+  const onSendPowerCommand = async (command: PowerCommand) => {
+    if (wakeInProgress) {
+      return;
+    }
+
+    const isWakeCommand = command === 'power-on';
+
+    if (isWakeCommand) {
+      setWakeInProgress(true);
+      setStatusText('Waking up the drones...');
+    }
+
+    try {
+      await sikApi.sendPowerCommand(command);
+      setStatusText(isWakeCommand ? 'Wake-up command burst completed.' : `${powerButtonLabel(command)} MAVLink command sent from broadcast radio.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to send power command.';
+      setStatusText(message);
+    } finally {
+      if (isWakeCommand) {
+        setWakeInProgress(false);
+      }
+    }
+  };
+
   const onUploadFirmware = async (role: RadioRole) => {
+    if (wakeInProgress) {
+      return;
+    }
+
     const portPath = role === 'left' ? leftPortPath : rightPortPath;
 
     if (!portPath) {
@@ -274,13 +380,22 @@ function App() {
     }
   };
 
-  const isCommandFlashing = (color: LedColor): boolean => {
+  const isCommandFlashing = (color: ReceiverCommand): boolean => {
     const ageMs = Date.now() - rightCommandFlashAt[color];
     return ageMs >= 0 && ageMs <= 900;
   };
 
   return (
     <main className="shell">
+      {wakeInProgress ? (
+        <div className="blocking-popover" role="dialog" aria-modal="true" aria-labelledby="wake-title">
+          <div className="blocking-popover__card">
+            <h2 id="wake-title">Waking Up Drones</h2>
+            <p>Sending the power on command every 250 ms for 10 seconds. Controls are temporarily locked.</p>
+          </div>
+        </div>
+      ) : null}
+
       <header className="header">
         <h1>SiK Broadcast Console</h1>
         <p>Left radio is broadcast control, right radio is receive monitor.</p>
@@ -370,15 +485,38 @@ function App() {
 
           <div className="commands">
             <h3>LED MAVLink Commands</h3>
-            <div className="command-grid">
+            <div className="command-grid compact">
               {commandColors.map((color) => (
                 <button
                   key={color}
-                  className={`led ${color}`}
+                  className={`led small ${colorButtonClass(color)}`}
+                  style={color === 'custom' ? { background: customColor, color: '#071016' } : undefined}
                   disabled={!leftRadio.connected || leftRadio.mode !== 'broadcast'}
                   onClick={() => void onSendLed(color)}
                 >
-                  LED {color.toUpperCase()}
+                  {colorButtonLabel(color)}
+                </button>
+              ))}
+            </div>
+            <div className="custom-color-row">
+              <label className="color-picker-label">
+                <span>Custom Color</span>
+                <input type="color" value={customColor} onChange={(event) => void onCustomColorChange(event.target.value)} />
+              </label>
+            </div>
+          </div>
+
+          <div className="commands">
+            <h3>Power Commands</h3>
+            <div className="command-grid compact two-up">
+              {powerCommands.map((command) => (
+                <button
+                  key={command}
+                  className={`led small power-button ${command}`}
+                  disabled={!leftRadio.connected || leftRadio.mode !== 'broadcast'}
+                  onClick={() => void onSendPowerCommand(command)}
+                >
+                  {powerButtonLabel(command)}
                 </button>
               ))}
             </div>
@@ -386,7 +524,7 @@ function App() {
 
           <div className="bytes">
             <h3>Transmitted Bytes (TX)</h3>
-            <pre>{txFrames.length > 0 ? txFrames.join('\n') : 'No TX bytes yet.'}</pre>
+            <pre ref={txLogRef} className="log-output">{txFrames.length > 0 ? txFrames.join('\n') : 'No TX bytes yet.'}</pre>
           </div>
 
         </article>
@@ -473,14 +611,26 @@ function App() {
 
           <div className="commands">
             <h3>Received Commands</h3>
-            <div className="command-grid">
+            <div className="command-grid compact">
               {commandColors.map((color) => (
                 <button
                   key={color}
-                  className={`led ${color} ghost ${isCommandFlashing(color) ? 'flash' : ''}`}
+                  className={`led small ${colorButtonClass(color)} ghost ${isCommandFlashing(color) ? 'flash' : ''}`}
+                  style={color === 'custom' ? { background: customColor, color: '#071016' } : undefined}
                   disabled
                 >
-                  LED {color.toUpperCase()}
+                  {colorButtonLabel(color)}
+                </button>
+              ))}
+            </div>
+            <div className="command-grid compact two-up">
+              {powerCommands.map((command) => (
+                <button
+                  key={command}
+                  className={`led small power-button ${command} ghost ${isCommandFlashing(command) ? 'flash' : ''}`}
+                  disabled
+                >
+                  {powerButtonLabel(command)}
                 </button>
               ))}
             </div>
@@ -488,7 +638,7 @@ function App() {
 
           <div className="bytes">
             <h3>Received Bytes (RX)</h3>
-            <pre>{rxFrames.length > 0 ? rxFrames.join('\n') : 'No RX bytes yet.'}</pre>
+            <pre ref={rxLogRef} className="log-output">{rxFrames.length > 0 ? rxFrames.join('\n') : 'No RX bytes yet.'}</pre>
           </div>
 
         </article>
