@@ -668,6 +668,10 @@ link_update(void)
 void
 tdm_remote_at(void)
 {
+  if (tdm_is_fixed_mode()) {
+    return;
+  }
+
   memcpy(remote_at_cmd, at_cmd, strlen(at_cmd)+1);
   send_at_command = true;
 }
@@ -679,6 +683,10 @@ tdm_remote_at(void)
 static bool 
 handle_at_command(__pdata uint8_t len)
 {
+  if (tdm_is_fixed_mode()) {
+    return true;
+  }
+
   if (len < 2 || len > AT_CMD_MAXLEN ||
       pbuf[0] != (uint8_t)'R' ||
       pbuf[1] != (uint8_t)'T') {

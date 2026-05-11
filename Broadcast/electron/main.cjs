@@ -51,6 +51,7 @@ const COLOR_TO_RGB = {
 const MAVLINK_MSG_ID_COMMAND_LONG = 76;
 const MAVLINK_COMMAND_DO_SET_RELAY = 181;
 const MAVLINK_COMMAND_PREFLIGHT_REBOOT_SHUTDOWN = 246;
+const MAVLINK2_STX = 0xfd;
 const MAVLINK_SYSTEM_ID_GCS = 255;
 const MAVLINK_COMPONENT_ID_GCS = 190;
 const MAVLINK_COMMAND_LONG_CRC_EXTRA = 152;
@@ -666,22 +667,25 @@ function buildMavlinkCommandLongRelayPacket(color, customColor = settingsDefault
   payload.writeUInt8(0, 31);           // target_component (broadcast)
   payload.writeUInt8(0, 32);           // confirmation
 
-  const header = Buffer.from([
-    0xfe,
+  const headerNoStx = Buffer.from([
     payload.length,
+    0,
+    0,
     mavlinkSequence,
     MAVLINK_SYSTEM_ID_GCS,
     MAVLINK_COMPONENT_ID_GCS,
-    MAVLINK_MSG_ID_COMMAND_LONG
+    MAVLINK_MSG_ID_COMMAND_LONG & 0xff,
+    (MAVLINK_MSG_ID_COMMAND_LONG >> 8) & 0xff,
+    (MAVLINK_MSG_ID_COMMAND_LONG >> 16) & 0xff
   ]);
 
   mavlinkSequence = (mavlinkSequence + 1) & 0xff;
 
-  const crcInput = Buffer.concat([header.subarray(1), payload]);
+  const crcInput = Buffer.concat([headerNoStx, payload]);
   const crc = x25Crc(crcInput, MAVLINK_COMMAND_LONG_CRC_EXTRA);
   const checksum = Buffer.from([crc & 0xff, (crc >> 8) & 0xff]);
 
-  return Buffer.concat([header, payload, checksum]);
+  return Buffer.concat([Buffer.from([MAVLINK2_STX]), headerNoStx, payload, checksum]);
 }
 
 function buildSkybrushPowerCommandPacket(command) {
@@ -700,22 +704,25 @@ function buildSkybrushPowerCommandPacket(command) {
   payload.writeUInt8(0, 31);
   payload.writeUInt8(0, 32);
 
-  const header = Buffer.from([
-    0xfe,
+  const headerNoStx = Buffer.from([
     payload.length,
+    0,
+    0,
     mavlinkSequence,
     MAVLINK_SYSTEM_ID_GCS,
     MAVLINK_COMPONENT_ID_GCS,
-    MAVLINK_MSG_ID_COMMAND_LONG
+    MAVLINK_MSG_ID_COMMAND_LONG & 0xff,
+    (MAVLINK_MSG_ID_COMMAND_LONG >> 8) & 0xff,
+    (MAVLINK_MSG_ID_COMMAND_LONG >> 16) & 0xff
   ]);
 
   mavlinkSequence = (mavlinkSequence + 1) & 0xff;
 
-  const crcInput = Buffer.concat([header.subarray(1), payload]);
+  const crcInput = Buffer.concat([headerNoStx, payload]);
   const crc = x25Crc(crcInput, MAVLINK_COMMAND_LONG_CRC_EXTRA);
   const checksum = Buffer.from([crc & 0xff, (crc >> 8) & 0xff]);
 
-  return Buffer.concat([header, payload, checksum]);
+  return Buffer.concat([Buffer.from([MAVLINK2_STX]), headerNoStx, payload, checksum]);
 }
 
 function parseMavlinkFrames(role, bytes) {
@@ -727,8 +734,8 @@ function parseMavlinkFrames(role, bytes) {
   const previous = Buffer.isBuffer(radio.mavlinkRxBuffer) ? radio.mavlinkRxBuffer : Buffer.alloc(0);
   let buffer = Buffer.concat([previous, bytes]);
 
-  while (buffer.length >= 8) {
-    const stxIndex = buffer.indexOf(0xfe);
+  while (buffer.length >= (1 + 9 + 2)) {
+    const stxIndex = buffer.indexOf(MAVLINK2_STX);
     if (stxIndex === -1) {
       buffer = Buffer.alloc(0);
       break;
@@ -738,12 +745,12 @@ function parseMavlinkFrames(role, bytes) {
       buffer = buffer.subarray(stxIndex);
     }
 
-    if (buffer.length < 8) {
+    if (buffer.length < (1 + 9 + 2)) {
       break;
     }
 
     const payloadLength = buffer[1];
-    const frameLength = 6 + payloadLength + 2;
+    const frameLength = 1 + 9 + payloadLength + 2;
     if (buffer.length < frameLength) {
       break;
     }
@@ -751,12 +758,19 @@ function parseMavlinkFrames(role, bytes) {
     const frame = buffer.subarray(0, frameLength);
     buffer = buffer.subarray(frameLength);
 
-    const msgId = frame[5];
+    const frameNoStx = frame.subarray(1);
+    const expectedCrc = x25Crc(frameNoStx.subarray(0, 9 + payloadLength), MAVLINK_COMMAND_LONG_CRC_EXTRA);
+    const receivedCrc = frameNoStx.readUInt16LE(9 + payloadLength);
+    if (expectedCrc !== receivedCrc) {
+      continue;
+    }
+
+    const msgId = frameNoStx[6] | (frameNoStx[7] << 8) | (frameNoStx[8] << 16);
     if (msgId !== MAVLINK_MSG_ID_COMMAND_LONG || payloadLength !== 33) {
       continue;
     }
 
-    const payload = frame.subarray(6, 6 + payloadLength);
+    const payload = frameNoStx.subarray(9, 9 + payloadLength);
     const command = payload.readUInt16LE(28);
 
     if (command === MAVLINK_COMMAND_DO_SET_RELAY) {
