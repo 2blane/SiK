@@ -154,6 +154,7 @@ input {
 }
 
 .action-button {
+  position: relative;
   border: 1px solid rgba(143, 211, 255, 0.28);
   border-radius: 10px;
   padding: 0.65rem 0.9rem;
@@ -162,6 +163,38 @@ input {
   font-weight: 600;
   letter-spacing: 0.02em;
   cursor: pointer;
+}
+
+.action-button > span {
+  position: relative;
+  z-index: 2;
+}
+
+.action-button.upload-progress {
+  overflow: hidden;
+  --upload-progress: 0%;
+}
+
+.action-button.upload-progress::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: var(--upload-progress);
+  background: linear-gradient(90deg, rgba(57, 205, 156, 0.35), rgba(114, 235, 173, 0.55));
+  transition: width 0.16s linear;
+  z-index: 1;
+}
+
+.action-button.upload-progress::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--upload-progress) - 14px);
+  width: 18px;
+  background: linear-gradient(90deg, rgba(208, 255, 238, 0), rgba(208, 255, 238, 0.62), rgba(208, 255, 238, 0));
+  z-index: 1;
+  pointer-events: none;
 }
 
 .action-button.secondary {
@@ -176,6 +209,28 @@ input {
 .firmware-note {
   color: var(--muted);
   font-size: 0.82rem;
+}
+
+.firmware-picker {
+  margin-top: 0.9rem;
+  border: 1px solid rgba(143, 211, 255, 0.18);
+  border-radius: 12px;
+  background: rgba(7, 14, 22, 0.6);
+  padding: 0.75rem;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.firmware-picker__line {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.firmware-picker__line span {
+  color: var(--muted);
 }
 
 .stats-panel {

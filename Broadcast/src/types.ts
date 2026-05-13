@@ -60,6 +60,20 @@ export interface FirmwareUploadResult {
   output: string;
 }
 
+export interface FirmwareUploadProgressEvent {
+  role: RadioRole;
+  portPath: string;
+  phase: 'starting' | 'erasing' | 'programming' | 'verifying' | 'done' | 'failed';
+  percent: number;
+  timestamp: number;
+}
+
+export interface FirmwareSelection {
+  path: string;
+  defaultPath: string;
+  usingDefault: boolean;
+}
+
 export interface InitPayload {
   ports: UsbPort[];
   radios: {
@@ -71,6 +85,7 @@ export interface InitPayload {
     right: string;
   };
   customColor: string;
+  firmwareSelection: FirmwareSelection;
 }
 
 export interface SikApi {
@@ -81,6 +96,8 @@ export interface SikApi {
   refreshRadioStats: (role: RadioRole) => Promise<RadioState>;
   setPreferredPort: (role: RadioRole, portPath: string) => Promise<{ left: string; right: string }>;
   setCustomColor: (color: string) => Promise<{ customColor: string }>;
+  pickFirmwareFile: () => Promise<FirmwareSelection>;
+  resetFirmwareFile: () => Promise<FirmwareSelection>;
   setDutyCycle: (role: RadioRole, dutyCycle: number) => Promise<RadioState>;
   uploadFirmware: (role: RadioRole, portPath: string) => Promise<FirmwareUploadResult>;
   sendLedCommand: (color: LedColor, customColor?: string) => Promise<{ ok: boolean }>;
@@ -89,4 +106,5 @@ export interface SikApi {
   onRadioStatus: (callback: (status: RadioState) => void) => () => void;
   onSerialData: (callback: (frame: SerialFrame) => void) => () => void;
   onCommandReceived: (callback: (event: CommandReceivedEvent) => void) => () => void;
+  onUploadProgress: (callback: (event: FirmwareUploadProgressEvent) => void) => () => void;
 }

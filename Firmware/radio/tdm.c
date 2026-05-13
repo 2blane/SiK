@@ -1081,6 +1081,8 @@ tdm_serial_loop(void)
              // (We can't decrypt a packet that is corrupt)
              if (crc == trailer.crc) {
                 LED_ACTIVITY = LED_ON;
+                // Strip MAVLink signatures before decryption
+                len = packet_strip_mavlink_signatures(pbuf, len);
                 serial_decrypt_buf(pbuf, len);
                 LED_ACTIVITY = LED_OFF;
              } else {
@@ -1090,6 +1092,8 @@ tdm_serial_loop(void)
              }
 #else // INCLUDE_AES
              LED_ACTIVITY = LED_ON;
+             // Strip MAVLink signatures if signing is enabled
+             len = packet_strip_mavlink_signatures(pbuf, len);
              serial_write_buf(pbuf, len);
              LED_ACTIVITY = LED_OFF;
 #endif // INCLUDE_AES
@@ -1485,7 +1489,8 @@ tdm_init(void)
 	// doesn't, then they will both using the same TDM round timings
 	packet_latency = (8+(10/2)) * ticks_per_byte + 13;
 
-	if (feature_golay) {
+  #ifdef INCLUDE_GOLAY
+  if (feature_golay) {
 		max_data_packet_length = (MAX_PACKET_LENGTH/2) - (6+sizeof(trailer));
 
 		// golay encoding doubles the cost per byte
@@ -1496,6 +1501,9 @@ tdm_init(void)
 	} else {
 		max_data_packet_length = MAX_PACKET_LENGTH - sizeof(trailer);
 	}
+  #else
+  max_data_packet_length = MAX_PACKET_LENGTH - sizeof(trailer);
+  #endif
 
 	// set the silence period to two times the packet latency
         silence_period = 2*packet_latency;

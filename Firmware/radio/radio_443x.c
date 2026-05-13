@@ -876,6 +876,7 @@ radio_configure(__pdata uint8_t air_rate)
 	set_frequency_registers(settings.frequency);
 	register_write(EZRADIOPRO_FREQUENCY_HOPPING_STEP_SIZE, settings.channel_spacing);
 
+	#ifdef INCLUDE_GOLAY
 	if (feature_golay) {
 		// when using golay encoding we use our own crc16
 		// instead of the hardware CRC, as we need to correct
@@ -901,6 +902,19 @@ radio_configure(__pdata uint8_t air_rate)
 		register_write(EZRADIOPRO_HEADER_ENABLE_3, 0xFF);
 		register_write(EZRADIOPRO_HEADER_ENABLE_2, 0xFF);
 	}
+	#else
+	register_write(EZRADIOPRO_DATA_ACCESS_CONTROL,
+		       EZRADIOPRO_ENPACTX |
+		       EZRADIOPRO_ENPACRX |
+		       EZRADIOPRO_ENCRC |
+		       EZRADIOPRO_CRC_16);
+	// 2 sync bytes and 2 header bytes
+	register_write(EZRADIOPRO_HEADER_CONTROL_2, EZRADIOPRO_HDLEN_2BYTE | EZRADIOPRO_SYNCLEN_2BYTE);
+	// check 2 bytes of header
+	register_write(EZRADIOPRO_HEADER_CONTROL_1, 0x0C);
+	register_write(EZRADIOPRO_HEADER_ENABLE_3, 0xFF);
+	register_write(EZRADIOPRO_HEADER_ENABLE_2, 0xFF);
+	#endif
 
 
 	// set FIFO limits to allow for sending larger than 64 byte packets
@@ -1041,6 +1055,7 @@ radio_set_network_id(uint16_t id)
 {
 	netid[0] = id&0xFF;
 	netid[1] = id>>8;
+	#if defined(INCLUDE_GOLAY)
 	if (!feature_golay) {
 		// when not using golay encoding we use the hardware
 		// headers for network ID
@@ -1049,6 +1064,12 @@ radio_set_network_id(uint16_t id)
 		register_write(EZRADIOPRO_CHECK_HEADER_3, id >> 8);
 		register_write(EZRADIOPRO_CHECK_HEADER_2, id & 0xFF);
 	}
+	#else
+	register_write(EZRADIOPRO_TRANSMIT_HEADER_3, id >> 8);
+	register_write(EZRADIOPRO_TRANSMIT_HEADER_2, id & 0xFF);
+	register_write(EZRADIOPRO_CHECK_HEADER_3, id >> 8);
+	register_write(EZRADIOPRO_CHECK_HEADER_2, id & 0xFF);
+	#endif
 }
 
 
@@ -1348,9 +1369,15 @@ INTERRUPT(Receiver_ISR, INTERRUPT_INT0)
 		last_rssi = register_read(EZRADIOPRO_RECEIVED_SIGNAL_STRENGTH_INDICATOR);
 	}
 
+	#if defined(INCLUDE_GOLAY)
 	if (feature_golay == false && (status & EZRADIOPRO_ICRCERROR)) {
 		goto rxfail;
 	}
+	#else
+	if (status & EZRADIOPRO_ICRCERROR) {
+		goto rxfail;
+	}
+	#endif
 
 	if (status & EZRADIOPRO_IPKVALID) {
 		__data uint8_t len = register_read(EZRADIOPRO_RECEIVED_PACKET_LENGTH);

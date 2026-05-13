@@ -80,11 +80,29 @@ all:		build
 build:		$(filter build~%,$(TARGETS))
 install:
 	@$(MAKE) $(filter install~%,$(TARGETS))
+	@echo "Normalizing bootloader hex files..."
+	srec_cat -disable-sequence-warning dst/bootloader~hm_trp~915.hex -Intel -o dst/bootloader~hm_trp~915.hex -Intel
+	srec_cat -disable-sequence-warning dst/bootloader~hm_trp~433.hex -Intel -o dst/bootloader~hm_trp~433.hex -Intel
 	@echo "Combining bootloader and radio firmware into a single hex file..."
-	srec_cat dst/bootloader~hm_trp~915.hex -Intel dst/radio~hm_trp.ihx -Intel -o dst/combined~915.hex -Intel
+	srec_cat -disable-sequence-warning dst/bootloader~hm_trp~915.hex -Intel dst/radio~hm_trp.ihx -Intel -o dst/combined~915.hex -Intel
 	srec_info dst/combined~915.hex -Intel
-	srec_cat dst/bootloader~hm_trp~433.hex -Intel dst/radio~hm_trp.ihx -Intel -o dst/combined~433.hex -Intel
+	srec_cat -disable-sequence-warning dst/bootloader~hm_trp~433.hex -Intel dst/radio~hm_trp.ihx -Intel -o dst/combined~433.hex -Intel
 	srec_info dst/combined~433.hex -Intel
+	@echo "Building Spectra firmware variants..."
+	@mkdir -p obj/spectra
+	@$(MAKE) -f radio/product.mk build BOARD=hm_trp OBJROOT=obj/spectra/915_broadcast CFLAGS_VARIANT="-DPARAM_FORMAT_VARIANT=0x1cUL -DDEFAULT_DUTY_CYCLE=100 -DDEFAULT_MIN_FREQ_KHZ=915000UL -DDEFAULT_MAX_FREQ_KHZ=928000UL"
+	@cp obj/spectra/915_broadcast/radio~hm_trp.ihx dst/spectra~915~broadcast.ihx
+	@srec_cat -disable-sequence-warning dst/bootloader~hm_trp~915.hex -Intel dst/spectra~915~broadcast.ihx -Intel -o dst/spectra~915~broadcast.hex -Intel
+	@$(MAKE) -f radio/product.mk build BOARD=hm_trp OBJROOT=obj/spectra/915_receiver CFLAGS_VARIANT="-DPARAM_FORMAT_VARIANT=0x1dUL -DDEFAULT_DUTY_CYCLE=0 -DDEFAULT_MIN_FREQ_KHZ=915000UL -DDEFAULT_MAX_FREQ_KHZ=928000UL"
+	@cp obj/spectra/915_receiver/radio~hm_trp.ihx dst/spectra~915~receiver.ihx
+	@srec_cat -disable-sequence-warning dst/bootloader~hm_trp~915.hex -Intel dst/spectra~915~receiver.ihx -Intel -o dst/spectra~915~receiver.hex -Intel
+	@$(MAKE) -f radio/product.mk build BOARD=hm_trp OBJROOT=obj/spectra/433_broadcast CFLAGS_VARIANT="-DPARAM_FORMAT_VARIANT=0x1eUL -DDEFAULT_DUTY_CYCLE=100 -DDEFAULT_MIN_FREQ_KHZ=433050UL -DDEFAULT_MAX_FREQ_KHZ=434790UL"
+	@cp obj/spectra/433_broadcast/radio~hm_trp.ihx dst/spectra~433~broadcast.ihx
+	@srec_cat -disable-sequence-warning dst/bootloader~hm_trp~433.hex -Intel dst/spectra~433~broadcast.ihx -Intel -o dst/spectra~433~broadcast.hex -Intel
+	@$(MAKE) -f radio/product.mk build BOARD=hm_trp OBJROOT=obj/spectra/433_receiver CFLAGS_VARIANT="-DPARAM_FORMAT_VARIANT=0x1fUL -DDEFAULT_DUTY_CYCLE=0 -DDEFAULT_MIN_FREQ_KHZ=433050UL -DDEFAULT_MAX_FREQ_KHZ=434790UL"
+	@cp obj/spectra/433_receiver/radio~hm_trp.ihx dst/spectra~433~receiver.ihx
+	@srec_cat -disable-sequence-warning dst/bootloader~hm_trp~433.hex -Intel dst/spectra~433~receiver.ihx -Intel -o dst/spectra~433~receiver.hex -Intel
+	@echo "Spectra firmware variants generated successfully"
 clean:
 	@echo "Removing entire build directory..."
 	rm -rf obj/

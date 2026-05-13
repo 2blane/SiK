@@ -358,26 +358,38 @@ class Uploader(object):
             time.sleep(0.2)
             self.port.flushInput()
             self.send('AT&UPDATE\r\n')
-            time.sleep(0.7)
+            # Give the modem enough time to jump into the bootloader.
+            time.sleep(1.2)
             self.port.flushInput()
             if self.atbaudrate != 115200:
                 self.setBaudrate(115200)
             print("Sent update command")
-            return True
+
+            # Some USB adapters/radios need a short settling window before sync.
+            for _ in range(10):
+                if self.__sync():
+                    print("Got sync after update command")
+                    return True
+                time.sleep(0.15)
+
+            # Update command was accepted, but we didn't get bootloader sync yet.
+            return False
         if self.atbaudrate != 115200:
             self.setBaudrate(115200)
         return False
 
     # verify whether the bootloader is present and responding
     def check(self):
-        for i in range(3):
+        for i in range(5):
             try:
                 if self.__sync():
                     print("Got sync")
                     return True
-                self.autosync()
+                if self.autosync():
+                    return True
             except RuntimeError:
-                self.autosync()
+                if self.autosync():
+                    return True
         return False
 
     def identify(self):

@@ -48,7 +48,31 @@
 
 #ifdef INCLUDE_AES
 #include "AES/aes.h"
+void param_set_default_encryption_key(__pdata uint8_t key_length);
 #endif // INCLUDE_AES
+
+// Allow compile-time configuration of parameter format version and duty cycle defaults
+#ifndef PARAM_FORMAT_VARIANT
+#define PARAM_FORMAT_VARIANT 0x1cUL
+#endif
+
+#ifndef DEFAULT_DUTY_CYCLE
+#define DEFAULT_DUTY_CYCLE 100
+#endif
+
+#ifndef DEFAULT_MIN_FREQ_KHZ
+#define DEFAULT_MIN_FREQ_KHZ 0
+#endif
+
+#ifndef DEFAULT_MAX_FREQ_KHZ
+#define DEFAULT_MAX_FREQ_KHZ 0
+#endif
+
+// Override PARAM_FORMAT_CURRENT with variant version
+#ifdef PARAM_FORMAT_CURRENT
+#undef PARAM_FORMAT_CURRENT
+#endif
+#define PARAM_FORMAT_CURRENT PARAM_FORMAT_VARIANT
 
 /// In-ROM parameter info table.
 ///
@@ -64,14 +88,15 @@ __code const struct parameter_info {
 	{"ECC",             0}, //Error Correction
 	{"MAVLINK",         1},
 	{"OPPRESEND",       0}, //DIFFERENT is a 1 on the sender
-	{"MIN_FREQ",        0},
-	{"MAX_FREQ",        0},
+	{"MIN_FREQ",        DEFAULT_MIN_FREQ_KHZ},
+	{"MAX_FREQ",        DEFAULT_MAX_FREQ_KHZ},
 	{"NUM_CHANNELS",    0}, //10 on the sender
-	{"DUTY_CYCLE",      100},
+	{"DUTY_CYCLE",      DEFAULT_DUTY_CYCLE},
 	{"LBT_RSSI",        0},
 	{"MANCHESTER",      0},
 	{"RTSCTS",          0},
 	{"MAX_WINDOW",    131},
+	{"MAVLINK_SIGN",    0},
 #ifdef INCLUDE_AES
 	{"ENCRYPTION_LEVEL", 0}, // no Enycryption (0), 128 or 256 bit key
 #endif
@@ -116,7 +141,6 @@ typedef char p2eCheck[(PIN_FLASH_END < PARAM_E_FLASH_START) ? 0 : -1];
 #else
 #define PARAM_E_FLASH_END PIN_FLASH_END
 #endif // INCLUDE_AES
-
 
 // Check to make sure we dont overflow off the page
 typedef char endCheck[(PARAM_E_FLASH_END < 1023) ? 0 : -1];
@@ -166,6 +190,12 @@ param_check(__pdata enum ParamID id, __data uint32_t val)
 		// which is the maximum we can handle with a 13
 		// bit trailer for window remaining
 		if (val > 131)
+			return false;
+		break;
+
+	case PARAM_MAVLINK_SIGN:
+		// boolean 0/1 only
+		if (val > 1)
 			return false;
 		break;
 
@@ -301,8 +331,12 @@ __critical {
   // read and verify encryption params
 #ifdef INCLUDE_AES
   if(!read_params((__xdata uint8_t *)encryption_key, PARAM_E_FLASH_START+1, sizeof(encryption_key)))
+	{
+		param_set_default_encryption_key(32);
     return false;
+	}
 #endif // INCLUDE_AES
+
 	return true;
 }
 
@@ -353,6 +387,11 @@ param_default(void)
 		pin_values[i].pin_mirror = pins_defaults.pin_mirror;
 	}
 #endif // PIN_MAX
+
+#ifdef INCLUDE_AES
+	param_set_default_encryption_key(32);
+#endif // INCLUDE_AES
+
 }
 
 enum ParamID
@@ -560,7 +599,6 @@ calibration_lock(void) __reentrant
 
 }
 #endif // BOARD_mro900
-
 
 #ifdef INCLUDE_AES
 // Used to convert individial Hex digits into Integers

@@ -1,12 +1,9 @@
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
-const { execFile } = require('node:child_process');
-const { promisify } = require('node:util');
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { spawn } = require('node:child_process');
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const { SerialPort } = require('serialport');
-
-const execFileAsync = promisify(execFile);
 
 const rendererUrl = 'http://localhost:5173';
 const portActivity = new WeakMap();
@@ -15,6 +12,7 @@ const portActivity = new WeakMap();
 let mainWindow = null;
 /** @type {NodeJS.Timeout | null} */
 let portPollTimer = null;
+const activeFirmwareUploadPorts = new Set();
 
 const LED_TO_RELAY_INDEX = {
   red: 1,
@@ -57,6 +55,7 @@ const MAVLINK_COMPONENT_ID_GCS = 190;
 const MAVLINK_COMMAND_LONG_CRC_EXTRA = 152;
 const SKYBRUSH_LOW_POWER_MODE = 126;
 const SKYBRUSH_RESUME_FROM_LOW_POWER_MODE = 127;
+const RADIO_BAUD_RATE = 57600;
 
 let mavlinkSequence = 0;
 
@@ -69,7 +68,8 @@ const settingsDefaults = {
     left: 100,
     right: 0
   },
-  customColor: '#ff8800'
+  customColor: '#ff8800',
+  firmwarePath: ''
 };
 
 const radios = {
@@ -534,12 +534,20 @@ function canConnectToDevServer(urlString) {
 function getFirmwarePaths() {
   const repoRoot = getRepoRoot();
   const firmwareDir = path.join(repoRoot, 'Firmware');
+  const defaultFirmwarePath = path.join(firmwareDir, 'dst', 'radio~hm_trp.ihx');
 
   return {
     firmwareDir,
     uploaderPath: path.join(firmwareDir, 'tools', 'uploader.py'),
-    firmwarePath: path.join(firmwareDir, 'dst', 'radio~hm_trp.ihx')
+    defaultFirmwarePath
   };
+}
+
+function getEffectiveFirmwarePath(settings) {
+  const { defaultFirmwarePath } = getFirmwarePaths();
+  const selected = typeof settings?.firmwarePath === 'string' ? settings.firmwarePath.trim() : '';
+
+  return selected || defaultFirmwarePath;
 }
 
 function getSettingsPath() {
@@ -563,7 +571,8 @@ function readSettings() {
         left: Number.isFinite(parsed?.dutyCycles?.left) ? parsed.dutyCycles.left : settingsDefaults.dutyCycles.left,
         right: Number.isFinite(parsed?.dutyCycles?.right) ? parsed.dutyCycles.right : settingsDefaults.dutyCycles.right
       },
-      customColor: typeof parsed?.customColor === 'string' ? parsed.customColor : settingsDefaults.customColor
+      customColor: typeof parsed?.customColor === 'string' ? parsed.customColor : settingsDefaults.customColor,
+      firmwarePath: typeof parsed?.firmwarePath === 'string' ? parsed.firmwarePath : settingsDefaults.firmwarePath
     };
   } catch {
     return structuredClone(settingsDefaults);
@@ -834,6 +843,10 @@ async function connectRadio(role, portPath) {
     throw new Error('Unknown radio role.');
   }
 
+  if (activeFirmwareUploadPorts.has(portPath)) {
+    throw new Error(`Port ${portPath} is busy with firmware upload.`);
+  }
+
   if (radio.connected && radio.path === portPath) {
     return serializeRadio(radio);
   }
@@ -844,7 +857,7 @@ async function connectRadio(role, portPath) {
 
   const port = new SerialPort({
     path: portPath,
-    baudRate: 57600,
+    baudRate: RADIO_BAUD_RATE,
     autoOpen: false
   });
 
@@ -928,6 +941,9 @@ async function ensurePreferredConnections(settings) {
 
   for (const role of ['left', 'right']) {
     const preferred = settings.preferredPorts[role];
+    if (!preferred || activeFirmwareUploadPorts.has(preferred)) {
+      continue;
+    }
     if (preferred && byPath.has(preferred) && !radios[role].connected) {
       try {
         await connectRadio(role, preferred);
@@ -946,7 +962,10 @@ async function uploadFirmware(role, portPath) {
     throw new Error('Select a USB port before uploading firmware.');
   }
 
-  const { firmwareDir, uploaderPath, firmwarePath } = getFirmwarePaths();
+  const { firmwareDir, uploaderPath } = getFirmwarePaths();
+  const settings = readSettings();
+  const firmwarePath = getEffectiveFirmwarePath(settings);
+  const firmwareExtension = path.extname(firmwarePath).toLowerCase();
 
   if (!fs.existsSync(uploaderPath)) {
     throw new Error(`Uploader script not found: ${uploaderPath}`);
@@ -956,25 +975,182 @@ async function uploadFirmware(role, portPath) {
     throw new Error(`Firmware image not found: ${firmwarePath}`);
   }
 
-  if (radio.port) {
-    await disconnectRadio(role);
+  if (firmwareExtension !== '.ihx') {
+    throw new Error(`Only .ihx firmware images are supported for uploads: ${firmwarePath}`);
   }
 
-  const { stdout, stderr } = await execFileAsync(
-    'python3',
-    [uploaderPath, '--port', selectedPortPath, firmwarePath],
-    {
-      cwd: firmwareDir,
-      maxBuffer: 1024 * 1024
-    }
-  );
+  if (activeFirmwareUploadPorts.has(selectedPortPath)) {
+    throw new Error(`Firmware upload is already in progress on ${selectedPortPath}.`);
+  }
 
-  return {
-    ok: true,
-    portPath: selectedPortPath,
-    firmwarePath,
-    output: [stdout, stderr].filter(Boolean).join('\n').trim()
-  };
+  activeFirmwareUploadPorts.add(selectedPortPath);
+
+  let stdout = '';
+  let stderr = '';
+  let uploadSucceeded = false;
+
+  try {
+    const rolesUsingSelectedPort = ['left', 'right'].filter((candidateRole) => {
+      const candidate = radios[candidateRole];
+      return candidate.path === selectedPortPath && candidate.port;
+    });
+
+    for (const connectedRole of rolesUsingSelectedPort) {
+      await disconnectRadio(connectedRole);
+    }
+
+    // Allow OS serial resources to settle before the uploader grabs the same device.
+    if (rolesUsingSelectedPort.length > 0) {
+      await sleep(200);
+    }
+
+    sendToRenderer('radio:uploadProgress', {
+      role,
+      portPath: selectedPortPath,
+      phase: 'starting',
+      percent: 0,
+      timestamp: Date.now()
+    });
+
+    await new Promise((resolve, reject) => {
+      const child = spawn(
+        'python3',
+        [uploaderPath, '--baudrate', String(RADIO_BAUD_RATE), '--port', selectedPortPath, firmwarePath],
+        { cwd: firmwareDir }
+      );
+
+      let progressPhase = 'starting';
+      let lastPercent = -1;
+      let stdoutRemainder = '';
+      let stderrRemainder = '';
+
+      const processLine = (line, streamName) => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          return;
+        }
+
+        if (/programing/i.test(trimmed)) {
+          progressPhase = 'programming';
+        } else if (/verifying/i.test(trimmed)) {
+          progressPhase = 'verifying';
+        } else if (/done\./i.test(trimmed)) {
+          progressPhase = 'done';
+        }
+
+        const percentMatch = trimmed.match(/\((\d+)%\)/);
+        if (percentMatch) {
+          const parsed = Number.parseInt(percentMatch[1], 10);
+          if (Number.isFinite(parsed) && parsed !== lastPercent) {
+            lastPercent = Math.max(0, Math.min(100, parsed));
+            sendToRenderer('radio:uploadProgress', {
+              role,
+              portPath: selectedPortPath,
+              phase: progressPhase,
+              percent: lastPercent,
+              timestamp: Date.now()
+            });
+          }
+        }
+
+        if (/erasing/i.test(trimmed) && lastPercent < 1) {
+          sendToRenderer('radio:uploadProgress', {
+            role,
+            portPath: selectedPortPath,
+            phase: 'erasing',
+            percent: 1,
+            timestamp: Date.now()
+          });
+        }
+
+        if (streamName === 'stdout') {
+          stdout += (stdout ? '\n' : '') + trimmed;
+        } else {
+          stderr += (stderr ? '\n' : '') + trimmed;
+        }
+      };
+
+      const processChunk = (chunk, streamName) => {
+        const text = chunk.toString('utf8');
+        const combined = (streamName === 'stdout' ? stdoutRemainder : stderrRemainder) + text;
+        const pieces = combined.split(/\r\n|\n|\r/g);
+        const remainder = pieces.pop() ?? '';
+
+        for (const piece of pieces) {
+          processLine(piece, streamName);
+        }
+
+        if (streamName === 'stdout') {
+          stdoutRemainder = remainder;
+        } else {
+          stderrRemainder = remainder;
+        }
+      };
+
+      child.stdout.on('data', (chunk) => processChunk(chunk, 'stdout'));
+      child.stderr.on('data', (chunk) => processChunk(chunk, 'stderr'));
+
+      child.on('error', (error) => reject(error));
+
+      child.on('close', (code) => {
+        if (stdoutRemainder) {
+          processLine(stdoutRemainder, 'stdout');
+        }
+        if (stderrRemainder) {
+          processLine(stderrRemainder, 'stderr');
+        }
+
+        if (code === 0) {
+          sendToRenderer('radio:uploadProgress', {
+            role,
+            portPath: selectedPortPath,
+            phase: 'done',
+            percent: 100,
+            timestamp: Date.now()
+          });
+          resolve(undefined);
+          return;
+        }
+
+        reject(new Error(`Uploader exited with code ${code ?? 'unknown'}.`));
+      });
+    });
+
+    uploadSucceeded = true;
+
+    return {
+      ok: true,
+      portPath: selectedPortPath,
+      firmwarePath,
+      output: [stdout, stderr].filter(Boolean).join('\n').trim()
+    };
+  } catch (error) {
+    sendToRenderer('radio:uploadProgress', {
+      role,
+      portPath: selectedPortPath,
+      phase: 'failed',
+      percent: 0,
+      timestamp: Date.now()
+    });
+
+    const output = [stdout, stderr].filter(Boolean).join('\n').trim();
+    const message = error instanceof Error ? error.message : 'Firmware upload process failed.';
+    throw new Error(output ? `${message}\n${output}` : message);
+  } finally {
+    activeFirmwareUploadPorts.delete(selectedPortPath);
+
+    if (uploadSucceeded) {
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        try {
+          await sleep(350);
+          await connectRadio(role, selectedPortPath);
+          break;
+        } catch {
+          // Radio can take a moment to reboot after flashing; keep retrying.
+        }
+      }
+    }
+  }
 }
 
 async function createWindow() {
@@ -1040,6 +1216,8 @@ app.on('window-all-closed', async () => {
 ipcMain.handle('app:init', async () => {
   const settings = readSettings();
   const ports = (await listPortsSafe()).map(normalizePort);
+  const { defaultFirmwarePath } = getFirmwarePaths();
+  const firmwarePath = getEffectiveFirmwarePath(settings);
 
   return {
     ports,
@@ -1048,7 +1226,12 @@ ipcMain.handle('app:init', async () => {
       right: serializeRadio(radios.right)
     },
     preferredPorts: settings.preferredPorts,
-    customColor: settings.customColor
+    customColor: settings.customColor,
+    firmwareSelection: {
+      path: firmwarePath,
+      defaultPath: defaultFirmwarePath,
+      usingDefault: firmwarePath === defaultFirmwarePath
+    }
   };
 });
 
@@ -1084,6 +1267,51 @@ ipcMain.handle('settings:setCustomColor', async (_event, color) => {
   settings.customColor = typeof color === 'string' ? color : settingsDefaults.customColor;
   writeSettings(settings);
   return { customColor: settings.customColor };
+});
+
+ipcMain.handle('settings:pickFirmwareFile', async () => {
+  const settings = readSettings();
+  const { defaultFirmwarePath } = getFirmwarePaths();
+  const currentPath = getEffectiveFirmwarePath(settings);
+
+  const result = await dialog.showOpenDialog(mainWindow ?? undefined, {
+    title: 'Select Firmware Image',
+    defaultPath: fs.existsSync(currentPath) ? currentPath : defaultFirmwarePath,
+    properties: ['openFile'],
+    filters: [
+      { name: 'SiK firmware (.ihx)', extensions: ['ihx'] }
+    ]
+  });
+
+  if (!result.canceled && result.filePaths.length > 0) {
+    const selected = result.filePaths[0];
+    if (path.extname(selected).toLowerCase() !== '.ihx') {
+      throw new Error(`Only .ihx files can be selected: ${selected}`);
+    }
+
+    settings.firmwarePath = selected;
+    writeSettings(settings);
+  }
+
+  const pathValue = getEffectiveFirmwarePath(readSettings());
+  return {
+    path: pathValue,
+    defaultPath: defaultFirmwarePath,
+    usingDefault: pathValue === defaultFirmwarePath
+  };
+});
+
+ipcMain.handle('settings:resetFirmwareFile', async () => {
+  const settings = readSettings();
+  settings.firmwarePath = '';
+  writeSettings(settings);
+
+  const { defaultFirmwarePath } = getFirmwarePaths();
+  return {
+    path: defaultFirmwarePath,
+    defaultPath: defaultFirmwarePath,
+    usingDefault: true
+  };
 });
 
 async function ensureRadiosInDataModeForSend() {
@@ -1193,7 +1421,7 @@ ipcMain.handle('radio:sendPowerCommand', async (_event, command) => {
   const { leftRadio } = await ensureRadiosInDataModeForSend();
 
   if (safeCommand === 'power-on') {
-    const sendCount = 40;
+    const sendCount = 48;
 
     for (let index = 0; index < sendCount; index += 1) {
       const payload = buildSkybrushPowerCommandPacket(safeCommand);

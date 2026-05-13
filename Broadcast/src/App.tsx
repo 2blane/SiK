@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import type {
   CommandReceivedEvent,
+  FirmwareSelection,
+  FirmwareUploadProgressEvent,
   FirmwareUploadResult,
   LedColor,
   PowerCommand,
@@ -31,6 +34,11 @@ const browserFallbackApi: SikApi = {
     radios: { left: emptyRadio('left'), right: emptyRadio('right') },
     preferredPorts: { left: '', right: '' },
     customColor: '#ff8800',
+    firmwareSelection: {
+      path: '',
+      defaultPath: '',
+      usingDefault: true,
+    },
   }),
   listPorts: async () => [],
   connectRadio: async (role) => emptyRadio(role),
@@ -38,6 +46,8 @@ const browserFallbackApi: SikApi = {
   refreshRadioStats: async (role) => emptyRadio(role),
   setPreferredPort: async () => ({ left: '', right: '' }),
   setCustomColor: async (color) => ({ customColor: color }),
+  pickFirmwareFile: async () => ({ path: '', defaultPath: '', usingDefault: true }),
+  resetFirmwareFile: async () => ({ path: '', defaultPath: '', usingDefault: true }),
   setDutyCycle: async (role, dutyCycle) => ({
     ...emptyRadio(role),
     dutyCycle,
@@ -55,6 +65,7 @@ const browserFallbackApi: SikApi = {
   onRadioStatus: () => () => undefined,
   onSerialData: () => () => undefined,
   onCommandReceived: () => () => undefined,
+  onUploadProgress: () => () => undefined,
 };
 
 const sikApi: SikApi = window.sik ?? browserFallbackApi;
@@ -114,6 +125,15 @@ function powerButtonLabel(command: PowerCommand): string {
   return command === 'power-on' ? 'power on' : 'sleep';
 }
 
+function getFileName(filePath: string): string {
+  if (!filePath) {
+    return 'None';
+  }
+  const normalized = filePath.replace(/\\/g, '/');
+  const pieces = normalized.split('/');
+  return pieces[pieces.length - 1] || filePath;
+}
+
 function App() {
   const [ports, setPorts] = useState<UsbPort[]>([]);
   const [leftRadio, setLeftRadio] = useState<RadioState>(emptyRadio('left'));
@@ -124,9 +144,14 @@ function App() {
   const [rxFrames, setRxFrames] = useState<string[]>([]);
   const [statusText, setStatusText] = useState('Waiting for USB radios...');
   const [uploadingRole, setUploadingRole] = useState<RadioRole | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<Record<RadioRole, number>>({ left: 0, right: 0 });
+  const [uploadPhase, setUploadPhase] = useState<Record<RadioRole, FirmwareUploadProgressEvent['phase']>>({ left: 'starting', right: 'starting' });
   const [refreshingRole, setRefreshingRole] = useState<RadioRole | null>(null);
   const [wakeInProgress, setWakeInProgress] = useState(false);
   const [customColor, setCustomColor] = useState('#ff8800');
+  const [firmwarePath, setFirmwarePath] = useState('');
+  const [firmwareDefaultPath, setFirmwareDefaultPath] = useState('');
+  const [firmwareUsingDefault, setFirmwareUsingDefault] = useState(true);
   const [rightCommandFlashAt, setRightCommandFlashAt] = useState<Record<ReceiverCommand, number>>({
     red: 0,
     blue: 0,
@@ -157,6 +182,9 @@ function App() {
       setLeftPortPath(payload.preferredPorts.left);
       setRightPortPath(payload.preferredPorts.right);
       setCustomColor(payload.customColor);
+      setFirmwarePath(payload.firmwareSelection.path);
+      setFirmwareDefaultPath(payload.firmwareSelection.defaultPath);
+      setFirmwareUsingDefault(payload.firmwareSelection.usingDefault);
       setStatusText('Ready. Select USB radios or rely on saved auto-connect.');
     };
 
@@ -193,12 +221,24 @@ function App() {
       }
     });
 
+    const offUploadProgress = sikApi.onUploadProgress((event: FirmwareUploadProgressEvent) => {
+      setUploadProgress((prev) => ({
+        ...prev,
+        [event.role]: Math.max(0, Math.min(100, event.percent)),
+      }));
+      setUploadPhase((prev) => ({
+        ...prev,
+        [event.role]: event.phase,
+      }));
+    });
+
     return () => {
       mounted = false;
       offPorts();
       offStatus();
       offSerial();
       offCommand();
+      offUploadProgress();
     };
   }, []);
 
@@ -353,6 +393,42 @@ function App() {
     }
   };
 
+  const applyFirmwareSelection = (selection: FirmwareSelection) => {
+    setFirmwarePath(selection.path);
+    setFirmwareDefaultPath(selection.defaultPath);
+    setFirmwareUsingDefault(selection.usingDefault);
+  };
+
+  const onPickFirmwareFile = async () => {
+    if (wakeInProgress || uploadingRole !== null) {
+      return;
+    }
+
+    try {
+      const selection = await sikApi.pickFirmwareFile();
+      applyFirmwareSelection(selection);
+      setStatusText(`Firmware selected: ${selection.path}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to open firmware picker.';
+      setStatusText(message);
+    }
+  };
+
+  const onResetFirmwareFile = async () => {
+    if (wakeInProgress || uploadingRole !== null) {
+      return;
+    }
+
+    try {
+      const selection = await sikApi.resetFirmwareFile();
+      applyFirmwareSelection(selection);
+      setStatusText(`Firmware reset to default: ${selection.path}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to reset firmware path.';
+      setStatusText(message);
+    }
+  };
+
   const onUploadFirmware = async (role: RadioRole) => {
     if (wakeInProgress) {
       return;
@@ -366,15 +442,19 @@ function App() {
     }
 
     setUploadingRole(role);
+    setUploadProgress((prev) => ({ ...prev, [role]: 0 }));
+    setUploadPhase((prev) => ({ ...prev, [role]: 'starting' }));
     setStatusText(`Uploading firmware to ${role === 'left' ? 'broadcast' : 'receiver'} radio on ${portPath}...`);
 
     try {
       const result: FirmwareUploadResult = await sikApi.uploadFirmware(role, portPath);
-      const outputSuffix = result.output ? ` ${result.output}` : '';
-      setStatusText(`Firmware uploaded to ${result.portPath}.${outputSuffix}`.trim());
+      setUploadProgress((prev) => ({ ...prev, [role]: 100 }));
+      setUploadPhase((prev) => ({ ...prev, [role]: 'done' }));
+      setStatusText(`Firmware uploaded to ${result.portPath}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Firmware upload failed.';
-      setStatusText(message);
+      setUploadPhase((prev) => ({ ...prev, [role]: 'failed' }));
+      setStatusText(message.split('\n')[0] || 'Firmware upload failed.');
     } finally {
       setUploadingRole(null);
     }
@@ -391,7 +471,7 @@ function App() {
         <div className="blocking-popover" role="dialog" aria-modal="true" aria-labelledby="wake-title">
           <div className="blocking-popover__card">
             <h2 id="wake-title">Waking Up Drones</h2>
-            <p>Sending the power on command every 250 ms for 10 seconds. Controls are temporarily locked.</p>
+            <p>Sending the power on command every 250 ms for 12 seconds. Controls are temporarily locked.</p>
           </div>
         </div>
       ) : null}
@@ -400,6 +480,25 @@ function App() {
         <h1>SiK Broadcast Console</h1>
         <p>Left radio is broadcast control, right radio is receive monitor.</p>
         <div className="status">{statusText}</div>
+        <div className="firmware-picker">
+          <div className="firmware-picker__line">
+            <strong>Firmware:</strong>
+            <span title={firmwarePath || firmwareDefaultPath}>
+              {getFileName(firmwarePath || firmwareDefaultPath)}
+            </span>
+            <span className={`chip ${firmwareUsingDefault ? 'ok' : 'off'}`}>
+              {firmwareUsingDefault ? 'Default' : 'Custom'}
+            </span>
+          </div>
+          <div className="firmware-actions">
+            <button className="action-button secondary" disabled={wakeInProgress || uploadingRole !== null} onClick={() => void onPickFirmwareFile()}>
+              Choose File...
+            </button>
+            <button className="action-button" disabled={wakeInProgress || uploadingRole !== null || firmwareUsingDefault} onClick={() => void onResetFirmwareFile()}>
+              Use Default
+            </button>
+          </div>
+        </div>
       </header>
 
       <section className="grid">
@@ -474,13 +573,18 @@ function App() {
 
           <div className="firmware-actions">
             <button
-              className="action-button"
+              className={`action-button ${uploadingRole === 'left' ? 'upload-progress' : ''}`}
+              style={uploadingRole === 'left' ? ({ '--upload-progress': `${uploadProgress.left}%` } as CSSProperties) : undefined}
               disabled={!leftPortPath || uploadingRole !== null}
               onClick={() => void onUploadFirmware('left')}
             >
-              {uploadingRole === 'left' ? 'Uploading Firmware...' : 'Upload Firmware'}
+              <span>
+                {uploadingRole === 'left'
+                  ? `${uploadPhase.left === 'verifying' ? 'Verifying' : uploadPhase.left === 'programming' ? 'Programming' : 'Uploading'} ${uploadProgress.left}%`
+                  : 'Upload Firmware'}
+              </span>
             </button>
-            <span className="firmware-note">Uses Firmware/dst/radio~hm_trp.ihx</span>
+            <span className="firmware-note">Uses {getFileName(firmwarePath || firmwareDefaultPath)}</span>
           </div>
 
           <div className="commands">
@@ -600,13 +704,18 @@ function App() {
 
           <div className="firmware-actions">
             <button
-              className="action-button"
+              className={`action-button ${uploadingRole === 'right' ? 'upload-progress' : ''}`}
+              style={uploadingRole === 'right' ? ({ '--upload-progress': `${uploadProgress.right}%` } as CSSProperties) : undefined}
               disabled={!rightPortPath || uploadingRole !== null}
               onClick={() => void onUploadFirmware('right')}
             >
-              {uploadingRole === 'right' ? 'Uploading Firmware...' : 'Upload Firmware'}
+              <span>
+                {uploadingRole === 'right'
+                  ? `${uploadPhase.right === 'verifying' ? 'Verifying' : uploadPhase.right === 'programming' ? 'Programming' : 'Uploading'} ${uploadProgress.right}%`
+                  : 'Upload Firmware'}
+              </span>
             </button>
-            <span className="firmware-note">Uses Firmware/dst/radio~hm_trp.ihx</span>
+            <span className="firmware-note">Uses {getFileName(firmwarePath || firmwareDefaultPath)}</span>
           </div>
 
           <div className="commands">

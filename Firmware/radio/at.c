@@ -458,6 +458,7 @@ at_ampersand(void)
         break;
     }
 #endif // INCLUDE_AES
+
 	default:
 		at_error();
 		break;

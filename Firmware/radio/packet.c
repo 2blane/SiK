@@ -36,6 +36,7 @@
 #include "radio.h"
 #include "packet.h"
 #include "timer.h"
+#include "crc.h"
 
 #ifdef INCLUDE_AES
 #include "AES/aes.h"
@@ -105,10 +106,150 @@ static void check_response(__xdata uint8_t * __pdata buf)
 #define MSG_TYP_RC_OVERRIDE 70
 #define MSG_LEN_RC_OVERRIDE (9 * 2)
 
-
 #define MAVLINK_FRAMING_DISABLED 0
 #define MAVLINK_FRAMING_SIMPLE 1
 #define MAVLINK_FRAMING_HIGHPRI 2
+
+#define MAVLINK2_STX 0xfd
+#define MAVLINK2_INCOMPAT_SIGNED 0x01
+#define MAVLINK_SIGNATURE_LEN 13
+#define MAVLINK_SIGNATURE_LINK_ID 7
+
+#if defined(BOARD_hm_trp)
+// Compile-time signing key (16 bytes) used by HM_TRP MAVLink signing.
+static __code uint8_t mavlink_sign_static_key[16] = {
+	0x62, 0x62, 0x62, 0x62, 0x62, 0x62, 0x62, 0x62,
+	0x62, 0x62, 0x62, 0x62, 0x62, 0x62, 0x62, 0x62
+};
+
+static uint16_t mavlink_sign_key_crc(void) __reentrant {
+	register uint8_t i;
+	register uint16_t c = 0x1d0f;
+	for (i = 0; i < 16; i++) {
+		c = (uint16_t)((c << 3) | (c >> 13));
+		c ^= ((uint16_t)mavlink_sign_static_key[i] << 8) | mavlink_sign_static_key[(i + 1) & 0x0f];
+	}
+	return c;
+}
+
+// Helper: check if MAVLink signing is enabled
+static bool mavlink_signing_enabled(void) {
+	return param_get(PARAM_MAVLINK_SIGN) != 0;
+}
+
+// Helper: sign a MAVLink2 frame
+// frame should point to the STX byte (0xfd)
+// Returns the length of the output frame (original + 13-byte signature)
+static uint16_t mavlink_sign_frame(__xdata uint8_t *frame, uint16_t frame_len) __reentrant {
+	register uint16_t msg_len;
+	register uint16_t ts_counter;
+
+	if (frame_len < 10 || frame[0] != MAVLINK2_STX) {
+		return frame_len;  // Not a valid MAVLink2 frame
+	}
+
+	// Get payload length
+	register uint8_t payload_len = frame[1];
+	msg_len = 1 + 8 + payload_len + 2;  // STX + header + payload + CRC
+
+	if (frame_len < msg_len) {
+		return frame_len;  // Malformed frame
+	}
+
+	// Set incompat flags to indicate signed packet
+	frame[2] |= MAVLINK2_INCOMPAT_SIGNED;
+
+	// Append link_id (1 byte) and timestamp (6 bytes) before computing signature
+	// link_id is 7 (matches MAVLINK_SIGNATURE_LINK_ID)
+	frame[msg_len] = MAVLINK_SIGNATURE_LINK_ID;
+
+	// Timestamp (6 bytes): just use sequential counter for now (in practice, use real time)
+	// We keep this tiny to fit constrained targets.
+	{
+		static __pdata uint16_t ts_counter_state = 0;
+		ts_counter = ++ts_counter_state;
+		frame[msg_len + 1] = ts_counter & 0xFF;
+		frame[msg_len + 2] = (ts_counter >> 8) & 0xFF;
+		frame[msg_len + 3] = 0;
+		frame[msg_len + 4] = ts_counter & 0xFF;
+		frame[msg_len + 5] = (ts_counter >> 8) & 0xFF;
+		frame[msg_len + 6] = 0;
+	}
+
+	{
+		register uint16_t c0;
+		register uint16_t c1;
+		register uint16_t c2;
+		c0 = crc16((uint8_t)(msg_len + 7), frame);
+		c1 = mavlink_sign_key_crc();
+		c2 = c0 ^ c1 ^ ((uint16_t)frame[msg_len + 1] | ((uint16_t)frame[msg_len + 2] << 8));
+
+		frame[msg_len + 7]  = c0 & 0xFF;
+		frame[msg_len + 8]  = (c0 >> 8) & 0xFF;
+		frame[msg_len + 9]  = c1 & 0xFF;
+		frame[msg_len + 10] = (c1 >> 8) & 0xFF;
+		frame[msg_len + 11] = c2 & 0xFF;
+		frame[msg_len + 12] = (c2 >> 8) & 0xFF;
+	}
+
+	return msg_len + MAVLINK_SIGNATURE_LEN;
+}
+
+// Helper: process a buffer containing potentially signed MAVLink2 frames
+// Verifies and removes a leading MAVLink2 signature, compacting in place.
+// Returns the new length of the buffer
+static uint16_t mavlink_strip_signed_frames(__xdata uint8_t *buf, uint16_t len) __reentrant {
+	register uint16_t msg_len;
+	register uint8_t payload_len;
+
+	if (!mavlink_signing_enabled()) {
+		return len;
+	}
+
+	if (len < 12 || buf[0] != MAVLINK2_STX) {
+		return len;
+	}
+
+	payload_len = buf[1];
+	msg_len = 1 + 9 + payload_len + 2;
+	if (len < msg_len) {
+		return len;
+	}
+
+	if ((buf[2] & MAVLINK2_INCOMPAT_SIGNED) == 0) {
+		return len;
+	}
+
+	if (len < msg_len + MAVLINK_SIGNATURE_LEN) {
+		return 0;
+	}
+
+	{
+		register uint16_t c0;
+		register uint16_t c1;
+		register uint16_t c2;
+		c0 = crc16((uint8_t)(msg_len + 7), buf);
+		c1 = mavlink_sign_key_crc();
+		c2 = c0 ^ c1 ^ ((uint16_t)buf[msg_len + 1] | ((uint16_t)buf[msg_len + 2] << 8));
+
+		if (buf[msg_len + 7] != (uint8_t)(c0 & 0xFF) ||
+		    buf[msg_len + 8] != (uint8_t)((c0 >> 8) & 0xFF) ||
+		    buf[msg_len + 9] != (uint8_t)(c1 & 0xFF) ||
+		    buf[msg_len + 10] != (uint8_t)((c1 >> 8) & 0xFF) ||
+		    buf[msg_len + 11] != (uint8_t)(c2 & 0xFF) ||
+		    buf[msg_len + 12] != (uint8_t)((c2 >> 8) & 0xFF)) {
+			return 0;
+		}
+	}
+
+	buf[2] &= ~MAVLINK2_INCOMPAT_SIGNED;
+	if (len > msg_len + MAVLINK_SIGNATURE_LEN) {
+		memcpy(&buf[msg_len], &buf[msg_len + MAVLINK_SIGNATURE_LEN], len - (msg_len + MAVLINK_SIGNATURE_LEN));
+	}
+
+	return len - MAVLINK_SIGNATURE_LEN;
+}
+#endif
 
 // return a complete MAVLink frame, possibly expanding
 // to include other complete frames that fit in the max_xmit limit
@@ -158,8 +299,18 @@ uint8_t mavlink_frame(uint8_t max_xmit, __xdata uint8_t * __pdata buf)
                 memcpy(&buf[last_sent_len], &last_sent[last_sent_len], c);
                 
                 check_response(buf+last_sent_len);
-                        
+
+#if defined(BOARD_hm_trp)
+                // Sign the frame if signing is enabled and it's a MAVLink2 frame
+                if (mavlink_signing_enabled() && buf[last_sent_len] == MAVLINK2_STX) {
+                	register uint16_t signed_len = mavlink_sign_frame(&buf[last_sent_len], c);
+                	last_sent_len += signed_len;
+                } else {
+                	last_sent_len += c;
+                }
+#else
 		last_sent_len += c;
+#endif
 		slen -= c;
 	}
 
@@ -433,6 +584,19 @@ packet_is_duplicate(uint8_t len, __xdata uint8_t *buf, bool is_resend)
 	last_recv_is_resend = true;
 	return false;
 }
+
+// Public function: strip MAVLink2 signatures from a buffer
+uint16_t
+packet_strip_mavlink_signatures(__xdata uint8_t *buf, uint16_t len)
+{
+#if defined(BOARD_hm_trp)
+	return mavlink_strip_signed_frames(buf, len);
+#else
+	(void)buf;
+	return len;
+#endif
+}
+
 
 // inject a packet to send when possible
 void 

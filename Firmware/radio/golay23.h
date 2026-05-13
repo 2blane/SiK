@@ -35,7 +35,7 @@
 #ifndef _GOLAY23_H_
 #define _GOLAY23_H_
 
-#ifndef INCLUDE_AES
+#if !defined(INCLUDE_AES) && !defined(DISABLE_GOLAY)
 #define INCLUDE_GOLAY
 #endif
 

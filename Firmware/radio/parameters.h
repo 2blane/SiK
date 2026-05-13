@@ -62,6 +62,7 @@ enum ParamID {
 	PARAM_MANCHESTER,		// enable manchester encoding
 	PARAM_RTSCTS,			// enable hardware flow control
 	PARAM_MAX_WINDOW,		// The maximum window size allowed
+	PARAM_MAVLINK_SIGN,		// MAVLink packet signing enable (0=off, 1=on)
 #ifdef INCLUDE_AES
   PARAM_ENCRYPTION,     // no Enycryption (0), 128 or 256 bit key
 #endif
@@ -158,3 +159,4 @@ extern bool param_set_encryption_key(__xdata unsigned char *key);
 ///
 extern void print_encryption_key(void);
 #endif // INCLUDE_AES
+

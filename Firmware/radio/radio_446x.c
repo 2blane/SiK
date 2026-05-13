@@ -773,6 +773,7 @@ radio_configure(__pdata uint8_t air_rate)
 	cmd_set_property1(GROUP_PKT, 0x06, 0x82);
 	wait_for_cts();
 
+	#if defined(INCLUDE_GOLAY)
 	if (!feature_golay) {
 		/* leave length byte in FIFO, field 3 will have variable length */
 		cmd_set_property1(GROUP_PKT, 0x08, 0x08 | 0x03);
@@ -835,6 +836,45 @@ radio_configure(__pdata uint8_t air_rate)
 		cmd_set_property4(GROUP_PKT, 0x0d, 0x00, 0x00, field_flags | 0x04, 0x00);
 		wait_for_cts();
 	}
+	#else
+	/* leave length byte in FIFO, field 3 will have variable length */
+	cmd_set_property1(GROUP_PKT, 0x08, 0x08 | 0x03);
+	wait_for_cts();
+
+	/* field 2 contains packet length */
+	cmd_set_property1(GROUP_PKT, 0x09, 0x02);
+	wait_for_cts();
+
+	/* common flags shared by all fields */
+	field_flags = 0x02; /* enable whitening */
+
+	/* RX field 1 (header): two bytes long, seed PN generator, enable and seed CRC */
+	cmd_set_property4(GROUP_PKT, 0x21, 0x00, 0x02, field_flags | 0x04, 0x82);
+	wait_for_cts();
+
+	/* RX field 2 (length): one byte long, enable CRC */
+	cmd_set_property4(GROUP_PKT, 0x25, 0x00, 0x01, field_flags, 0x02);
+	wait_for_cts();
+
+	/* RX field 3 (payload): variable length, enable CRC, check CRC at end of field */
+	cmd_set_property4(GROUP_PKT, 0x29, 0x00, MAX_PACKET_LENGTH, field_flags, 0x0a);
+	wait_for_cts();
+
+	/* TX field 1 (whole packet): seed PN generator, enable and seed CRC, send CRC at end of field */
+	cmd_set_property4(GROUP_PKT, 0x0d, 0x00, 0x00, field_flags | 0x04, 0xa2);
+	wait_for_cts();
+
+	/* enable match bytes 1 and 2, point them toward the header */
+	cmd_set_property3(GROUP_MATCH, 0x00, 0x00, 0xff, 0x40);
+	wait_for_cts();
+	cmd_set_property3(GROUP_MATCH, 0x03, 0x00, 0xff, 0x01);
+	wait_for_cts();
+	/* comply with requirement of 'non-descending offsets' */
+	cmd_set_property1(GROUP_MATCH, 0x08, 0x01);
+	wait_for_cts();
+	cmd_set_property1(GROUP_MATCH, 0x0b, 0x01);
+	wait_for_cts();
+	#endif
 
 	cmd_set_property2(GROUP_PKT, 0x0b, TX_FIFO_THRESHOLD, RX_FIFO_THRESHOLD);
 	wait_for_cts();
@@ -913,12 +953,19 @@ radio_set_network_id(uint16_t id)
 	netid[0] = id&0xFF;
 	netid[1] = id>>8;
 
+	#if defined(INCLUDE_GOLAY)
 	if (!feature_golay) {
 		cmd_set_property1(GROUP_MATCH, 0x00, netid[1]);
 		wait_for_cts();
 		cmd_set_property1(GROUP_MATCH, 0x03, netid[0]);
 		wait_for_cts();
 	}
+	#else
+	cmd_set_property1(GROUP_MATCH, 0x00, netid[1]);
+	wait_for_cts();
+	cmd_set_property1(GROUP_MATCH, 0x03, netid[0]);
+	wait_for_cts();
+	#endif
 }
 
 /// clear interrupts by reading the two status registers
@@ -1116,11 +1163,15 @@ INTERRUPT(Receiver_ISR, INTERRUPT_INT0)
 		packet_info_reply(receive_packet_length);
 
                 /* account for header and size byte */
+		#if defined(INCLUDE_GOLAY)
 		if (feature_golay) {
 			receive_packet_length += 1;
 		} else {
 			receive_packet_length += 3;
 		}
+		#else
+		receive_packet_length += 3;
+		#endif
 
                 /* retrieve number of bytes in FIFO */
 		cmd_fifo_info(0);

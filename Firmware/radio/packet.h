@@ -74,3 +74,13 @@ extern void packet_inject(__xdata uint8_t *buf, __pdata uint8_t len);
 #define MAVLINK10_STX 254
 #define MAVLINK20_STX 253
 
+/// Strip MAVLink2 signatures from a buffer of received data
+/// If signing is enabled, verifies signatures on signed frames and removes them
+/// If a signature is invalid, the entire frame is dropped
+/// Returns the new length of the buffer
+///
+/// @param buf			buffer containing potentially signed frames
+/// @param len			length of the buffer
+/// @return			new length after stripping signatures
+extern uint16_t packet_strip_mavlink_signatures(__xdata uint8_t *buf, uint16_t len);
+

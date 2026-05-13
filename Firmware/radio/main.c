@@ -120,7 +120,11 @@ main(void)
 
 	// setup boolean features
 	feature_mavlink_framing = param_get(PARAM_MAVLINK);
+	#ifdef INCLUDE_GOLAY
 	feature_golay = param_get(PARAM_ECC)?true:false;
+	#else
+	feature_golay = false;
+	#endif
 	feature_rtscts = param_get(PARAM_RTSCTS)?true:false;
 
 	// Do hardware initialisation.
@@ -369,29 +373,6 @@ radio_init(void)
 	// constrain power and channels
 	txpower = constrain(txpower, BOARD_MINTXPOWER, BOARD_MAXTXPOWER);
 	num_fh_channels = constrain(num_fh_channels, 1, MAX_FREQ_CHANNELS);
-
-	// double check ranges the board can do
-	switch (g_board_frequency) {
-	case FREQ_433:
-		freq_min = constrain(freq_min, 414000000UL, 460000000UL);
-		freq_max = constrain(freq_max, 414000000UL, 460000000UL);
-		break;
-	case FREQ_470:
-		freq_min = constrain(freq_min, 450000000UL, 490000000UL);
-		freq_max = constrain(freq_max, 450000000UL, 490000000UL);
-		break;
-	case FREQ_868:
-		freq_min = constrain(freq_min, 849000000UL, 889000000UL);
-		freq_max = constrain(freq_max, 849000000UL, 889000000UL);
-		break;
-	case FREQ_915:
-		freq_min = constrain(freq_min, 868000000UL, 935000000UL);
-		freq_max = constrain(freq_max, 868000000UL, 935000000UL);
-		break;
-	default:
-		panic("bad board frequency %d", g_board_frequency);
-		break;
-	}
 
 	if (freq_max == freq_min) {
 		freq_max = freq_min + 1000000UL;
