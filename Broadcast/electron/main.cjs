@@ -14,28 +14,6 @@ let mainWindow = null;
 let portPollTimer = null;
 const activeFirmwareUploadPorts = new Set();
 
-const LED_TO_RELAY_INDEX = {
-  red: 1,
-  blue: 2,
-  green: 3,
-  white: 4,
-  black: 5,
-  yellow: 6,
-  purple: 7,
-  custom: 8
-};
-
-const RELAY_INDEX_TO_COLOR = {
-  1: 'red',
-  2: 'blue',
-  3: 'green',
-  4: 'white',
-  5: 'black',
-  6: 'yellow',
-  7: 'purple',
-  8: 'custom'
-};
-
 const COLOR_TO_RGB = {
   red: [255, 0, 0],
   blue: [0, 0, 255],
@@ -47,12 +25,19 @@ const COLOR_TO_RGB = {
 };
 
 const MAVLINK_MSG_ID_COMMAND_LONG = 76;
-const MAVLINK_COMMAND_DO_SET_RELAY = 181;
+const MAVLINK_MSG_ID_LED_CONTROL = 186;
 const MAVLINK_COMMAND_PREFLIGHT_REBOOT_SHUTDOWN = 246;
 const MAVLINK2_STX = 0xfd;
-const MAVLINK_SYSTEM_ID_GCS = 255;
+const MAVLINK_SYSTEM_ID_GCS = 253;
 const MAVLINK_COMPONENT_ID_GCS = 190;
 const MAVLINK_COMMAND_LONG_CRC_EXTRA = 152;
+const MAVLINK_LED_CONTROL_CRC_EXTRA = 72;
+const LED_CONTROL_TARGET_SYSTEM = 0;
+const LED_CONTROL_TARGET_COMPONENT = 0;
+const LED_CONTROL_INSTANCE = 42;
+const LED_CONTROL_PATTERN_SKYBRUSH = 42;
+const LED_CONTROL_CUSTOM_BYTES_LENGTH = 24;
+const LED_CONTROL_CUSTOM_LEN = 6;
 const SKYBRUSH_LOW_POWER_MODE = 126;
 const SKYBRUSH_RESUME_FROM_LOW_POWER_MODE = 127;
 const RADIO_BAUD_RATE = 57600;
@@ -659,22 +644,31 @@ function x25Crc(buffer, crcExtra) {
   return crc;
 }
 
-function buildMavlinkCommandLongRelayPacket(color, customColor = settingsDefaults.customColor) {
-  const relayIndex = LED_TO_RELAY_INDEX[color] ?? LED_TO_RELAY_INDEX.white;
-  const rgb = color === 'custom' ? hexToRgb(customColor) : (COLOR_TO_RGB[color] ?? COLOR_TO_RGB.white);
-  const payload = Buffer.alloc(33);
+function buildLedControlCustomBytes(rgb, { durationMs = 60000, flash = false } = {}) {
+  const customBytes = Buffer.alloc(LED_CONTROL_CUSTOM_BYTES_LENGTH);
+  const boundedDuration = Math.max(0, Math.min(65535, Math.round(durationMs)));
 
-  payload.writeFloatLE(relayIndex, 0); // param1 relay number
-  payload.writeFloatLE(1.0, 4);        // param2 relay on
-  payload.writeFloatLE(rgb[0], 8);     // param3 red
-  payload.writeFloatLE(rgb[1], 12);    // param4 green
-  payload.writeFloatLE(rgb[2], 16);    // param5 blue
-  payload.writeFloatLE(0.0, 20);       // param6
-  payload.writeFloatLE(0.0, 24);       // param7
-  payload.writeUInt16LE(MAVLINK_COMMAND_DO_SET_RELAY, 28);
-  payload.writeUInt8(0, 30);           // target_system (broadcast)
-  payload.writeUInt8(0, 31);           // target_component (broadcast)
-  payload.writeUInt8(0, 32);           // confirmation
+  customBytes.writeUInt8(rgb[0], 0);
+  customBytes.writeUInt8(rgb[1], 1);
+  customBytes.writeUInt8(rgb[2], 2);
+  customBytes.writeUInt8(boundedDuration & 0xff, 3);
+  customBytes.writeUInt8((boundedDuration >> 8) & 0xff, 4);
+  customBytes.writeUInt8(flash ? 2 : 1, 5);
+
+  return customBytes;
+}
+
+function buildMavlinkLedControlPacket(color, customColor = settingsDefaults.customColor) {
+  const rgb = color === 'custom' ? hexToRgb(customColor) : (COLOR_TO_RGB[color] ?? COLOR_TO_RGB.white);
+  const customBytes = buildLedControlCustomBytes(rgb);
+  const payload = Buffer.alloc(11);
+
+  payload.writeUInt8(LED_CONTROL_TARGET_SYSTEM, 0);
+  payload.writeUInt8(LED_CONTROL_TARGET_COMPONENT, 1);
+  payload.writeUInt8(LED_CONTROL_INSTANCE, 2);
+  payload.writeUInt8(LED_CONTROL_PATTERN_SKYBRUSH, 3);
+  payload.writeUInt8(LED_CONTROL_CUSTOM_LEN, 4);
+  customBytes.copy(payload, 5);
 
   const headerNoStx = Buffer.from([
     payload.length,
@@ -683,15 +677,15 @@ function buildMavlinkCommandLongRelayPacket(color, customColor = settingsDefault
     mavlinkSequence,
     MAVLINK_SYSTEM_ID_GCS,
     MAVLINK_COMPONENT_ID_GCS,
-    MAVLINK_MSG_ID_COMMAND_LONG & 0xff,
-    (MAVLINK_MSG_ID_COMMAND_LONG >> 8) & 0xff,
-    (MAVLINK_MSG_ID_COMMAND_LONG >> 16) & 0xff
+    MAVLINK_MSG_ID_LED_CONTROL & 0xff,
+    (MAVLINK_MSG_ID_LED_CONTROL >> 8) & 0xff,
+    (MAVLINK_MSG_ID_LED_CONTROL >> 16) & 0xff
   ]);
 
   mavlinkSequence = (mavlinkSequence + 1) & 0xff;
 
   const crcInput = Buffer.concat([headerNoStx, payload]);
-  const crc = x25Crc(crcInput, MAVLINK_COMMAND_LONG_CRC_EXTRA);
+  const crc = x25Crc(crcInput, MAVLINK_LED_CONTROL_CRC_EXTRA);
   const checksum = Buffer.from([crc & 0xff, (crc >> 8) & 0xff]);
 
   return Buffer.concat([Buffer.from([MAVLINK2_STX]), headerNoStx, payload, checksum]);
@@ -768,32 +762,52 @@ function parseMavlinkFrames(role, bytes) {
     buffer = buffer.subarray(frameLength);
 
     const frameNoStx = frame.subarray(1);
-    const expectedCrc = x25Crc(frameNoStx.subarray(0, 9 + payloadLength), MAVLINK_COMMAND_LONG_CRC_EXTRA);
+    const msgId = frameNoStx[6] | (frameNoStx[7] << 8) | (frameNoStx[8] << 16);
+    const crcExtra = msgId === MAVLINK_MSG_ID_LED_CONTROL ? MAVLINK_LED_CONTROL_CRC_EXTRA : MAVLINK_COMMAND_LONG_CRC_EXTRA;
+    const expectedCrc = x25Crc(frameNoStx.subarray(0, 9 + payloadLength), crcExtra);
     const receivedCrc = frameNoStx.readUInt16LE(9 + payloadLength);
     if (expectedCrc !== receivedCrc) {
       continue;
     }
 
-    const msgId = frameNoStx[6] | (frameNoStx[7] << 8) | (frameNoStx[8] << 16);
+    if (msgId === MAVLINK_MSG_ID_LED_CONTROL && payloadLength >= 11) {
+      const payload = frameNoStx.subarray(9, 9 + payloadLength);
+      const targetSystem = payload.readUInt8(0);
+      const targetComponent = payload.readUInt8(1);
+      const instance = payload.readUInt8(2);
+      const pattern = payload.readUInt8(3);
+      const customLen = payload.readUInt8(4);
+
+      if (
+        targetSystem !== LED_CONTROL_TARGET_SYSTEM ||
+        targetComponent !== LED_CONTROL_TARGET_COMPONENT ||
+        instance !== LED_CONTROL_INSTANCE ||
+        pattern !== LED_CONTROL_PATTERN_SKYBRUSH ||
+        customLen < 6
+      ) {
+        continue;
+      }
+
+      const red = payload.readUInt8(5);
+      const green = payload.readUInt8(6);
+      const blue = payload.readUInt8(7);
+      const mappedColor = Object.entries(COLOR_TO_RGB).find(([, rgb]) => rgb[0] === red && rgb[1] === green && rgb[2] === blue)?.[0] ?? 'custom';
+
+      sendToRenderer('radio:commandReceived', {
+        role,
+        color: mappedColor,
+        timestamp: Date.now()
+      });
+
+      continue;
+    }
+
     if (msgId !== MAVLINK_MSG_ID_COMMAND_LONG || payloadLength !== 33) {
       continue;
     }
 
     const payload = frameNoStx.subarray(9, 9 + payloadLength);
     const command = payload.readUInt16LE(28);
-
-    if (command === MAVLINK_COMMAND_DO_SET_RELAY) {
-      const relayIndex = Math.round(payload.readFloatLE(0));
-      const mappedColor = RELAY_INDEX_TO_COLOR[relayIndex];
-      if (mappedColor) {
-        sendToRenderer('radio:commandReceived', {
-          role,
-          color: mappedColor,
-          timestamp: Date.now()
-        });
-      }
-      continue;
-    }
 
     if (command === MAVLINK_COMMAND_PREFLIGHT_REBOOT_SHUTDOWN) {
       const modeValue = Math.round(payload.readFloatLE(0));
@@ -1407,7 +1421,7 @@ ipcMain.handle('radio:setDutyCycle', async (_event, role, dutyCycleValue) => {
 
 ipcMain.handle('radio:sendLed', async (_event, color, customColor) => {
   const safeColor = ['red', 'blue', 'green', 'white', 'black', 'yellow', 'purple', 'custom'].includes(color) ? color : 'white';
-  const payload = buildMavlinkCommandLongRelayPacket(safeColor, customColor);
+  const payload = buildMavlinkLedControlPacket(safeColor, customColor);
   const { leftRadio } = await ensureRadiosInDataModeForSend();
 
   await writeToPort(leftRadio.port, payload);
