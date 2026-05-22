@@ -166,6 +166,7 @@ function App() {
   });
   const txLogRef = useRef<HTMLPreElement | null>(null);
   const rxLogRef = useRef<HTMLPreElement | null>(null);
+  const colorPickerThrottleRef = useRef<{ lastSent: number; timer: ReturnType<typeof setTimeout> | null }>({ lastSent: 0, timer: null });
 
   useEffect(() => {
     let mounted = true;
@@ -365,6 +366,28 @@ function App() {
       await sikApi.setCustomColor(value);
     } catch {
       // Keep local UI state even if persistence fails.
+    }
+
+    if (!leftRadio.connected || leftRadio.mode !== 'broadcast') {
+      return;
+    }
+
+    const throttle = colorPickerThrottleRef.current;
+    const now = Date.now();
+    if (throttle.timer !== null) {
+      clearTimeout(throttle.timer);
+      throttle.timer = null;
+    }
+    const elapsed = now - throttle.lastSent;
+    const doSend = () => {
+      throttle.lastSent = Date.now();
+      throttle.timer = null;
+      void sikApi.sendLedCommand('custom', value);
+    };
+    if (elapsed >= 100) {
+      doSend();
+    } else {
+      throttle.timer = setTimeout(doSend, 100 - elapsed);
     }
   };
 
